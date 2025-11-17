@@ -5,10 +5,11 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # 3. 오라클 클라이언트 설치 (Zip 다운로드 대신 apt 저장소 방식 사용)
+# 3. 오라클 클라이언트 설치 (Bookworm 버전으로 수정)
 RUN apt-get update && apt-get install -y wget gpg ca-certificates libaio1 \
  && wget https://apt.oracle.com/CONTENT/GPG/oracle-hrms-pub-key.pub \
  && gpg --dearmor oracle-hrms-pub-key.pub --yes -o /usr/share/keyrings/oracle-hrms-pub-key.gpg \
- && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/oracle-hrms-pub-key.gpg] https://apt.oracle.com/oracle-instantclient bullseye main" > /etc/apt/sources.list.d/oracle-instantclient.list \
+ && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/oracle-hrms-pub-key.gpg] https://apt.oracle.com/oracle-instantclient bookworm main" > /etc/apt/sources.list.d/oracle-instantclient.list \
  && apt-get update \
  && apt-get install -y oracle-instantclient-basic \
  && rm oracle-hrms-pub-key.pub \
