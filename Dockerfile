@@ -3,15 +3,12 @@ FROM python:3.10-slim
 
 # 2. 작업 폴더 설정
 WORKDIR /app
-
 RUN apt-get update \
-    && apt-get install -y wget unzip libaio1 \
+    && apt-get install -y wget unzip ca-certificates libaio1 || apt-get install -y libaio \
     && mkdir -p /opt/oracle \
-    && wget https://download.oracle.com/otn_software/linux/instantclient/instantclient-basiclite-linuxx64.zip \
-    && unzip instantclient-basiclite-linuxx64.zip -d /opt/oracle \
-    && rm instantclient-basiclite-linuxx64.zip \
-    && echo "/opt/oracle/instantclient_23_5" > /etc/ld.so.conf.d/oracle-instantclient.conf \
-    && ldconfig
+    && wget --progress=dot:giga https://download.oracle.com/otn_software/linux/instantclient/instantclient-basiclite-linuxx64.zip -O /opt/oracle/instantclient.zip \
+    && unzip /opt/oracle/instantclient.zip -d /opt/oracle \
+    && rm /opt/oracle/instantclient.zip \
 
 
 # 4. 파이썬 라이브러리 설치 (requirements.txt 파일이 필요합니다)
