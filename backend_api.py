@@ -52,17 +52,40 @@ def close_db_connection(exception):
         db.release()
 
 # --- 3. Spotify API 헬퍼 ---
+네, 알겠습니다. 제 실수를 인정합니다.
+
+URL과 변수가 모두 정상이라는 말씀을 전제로, 왜 백엔드 로그에 오류가 없는데 프론트엔드가 401 Token expired 오류를 받는지 다시 분석했습니다.
+
+문제의 원인을 찾았습니다.
+
+backend_api.py의 get_spotify_token 함수는 "네트워크 오류"가 나지 않으면, 스포티파이가 에러 메시지가 담긴 JSON을 보내도 **"성공"**으로 간주합니다.
+
+docker-compose.yml의 키가 정상이라고 하셨으니, 스포티파이가 200 OK 응답에 {"error": "invalid_client", ...} 같은 에러 객체를 담아 보냈을 것입니다.
+
+현재 백엔드 코드는 이 에러를 확인하지 않고, token_data.get("access_token") (결과는 None)을 프론트엔드로 전달합니다.
+
+프론트엔드는 access_token: null을 받고, Authorization: Bearer null로 API를 요청하니 당연히 401 오류가 발생하는 것입니다.
+
+1단계: 🐍 백엔드 수정 (backend_api.py)
+백엔드가 스포티파이로부터 받은 응답에 access_token이 실제로 들어있는지 확인하는 로직을 추가해야 합니다.
+
+**메인 PC(개발 PC)**의 backend 레포지토리에서 backend_api.py 파일의 @app.route('/api/spotify-token') 함수 전체를 아래 내용으로 덮어쓰세요.
+
+Python
+
+# [❗️] 이 함수 전체를 아래 내용으로 덮어쓰세요.
+
 @app.route('/api/spotify-token', methods=['GET'])
 def get_spotify_token():
-    # 키를 코드에 하드코딩하지 않고, 환경 변수에서 안전하게 불러옵니다.
+    # docker-compose.yml에서 환경 변수 로드
     client_id = os.environ.get('SPOTIFY_CLIENT_ID')
     client_secret = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
     if not client_id or not client_secret:
         return jsonify({"error": "Spotify API 키가 서버에 설정되지 않았습니다."}), 500
 
-    # 스포티파이에 토큰 요청
-    auth_url = 'https://accounts.spotify.com/api/token'
+    # backend_api.py 상단에 정의된 변수 사용
+    auth_url = SPOTIFY_AUTH_URL 
     auth_header = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
     
     try:
@@ -75,13 +98,30 @@ def get_spotify_token():
             data={'grant_type': 'client_credentials'}
         )
         
-        response.raise_for_status() # 오류가 있으면 예외 발생
+        # 4xx, 5xx 오류가 발생하면 즉시 예외 발생
+        response.raise_for_status() 
         token_data = response.json()
         
-        # 프론트엔드에는 'access_token'만 전달
-        return jsonify({"access_token": token_data.get("access_token")})
+        # --- [❗️ 핵심 수정 사항 ❗️] ---
+        # 스포티파이가 200 OK 와 함께 에러를 보낼 수 있음
+        if "error" in token_data:
+            print(f"[Backend Error] Spotify returned an error: {token_data}")
+            return jsonify({"error": token_data.get("error_description", "Invalid response from Spotify")}), 502
+
+        access_token = token_data.get("access_token")
+        
+        # access_token이 없는지 다시 한번 확인
+        if not access_token:
+            print(f"[Backend Error] No access_token in Spotify response: {token_data}")
+            return jsonify({"error": "No access_token found in Spotify response"}), 502
+        # --- [❗️ 수정 완료 ❗️] ---
+
+        # 성공 시 토큰 전달
+        return jsonify({"access_token": access_token})
 
     except requests.exceptions.RequestException as e:
+        # 이 로그는 네트워크 연결 자체를 실패했을 때만 표시됩니다.
+        print(f"[Backend Error] requests.post failed: {str(e)}")
         return jsonify({"error": f"스포티파이 토큰 요청 실패: {str(e)}"}), 502
 
 def get_spotify_headers():
