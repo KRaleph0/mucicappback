@@ -4,17 +4,15 @@ FROM python:3.10-slim
 # 2. 작업 폴더 설정
 WORKDIR /app
 
-# 3. 오라클 클라이언트 설치 (Zip 다운로드 대신 apt 저장소 방식 사용)
-# 3. 오라클 클라이언트 설치 (Bookworm 버전으로 수정)
-RUN apt-get update && apt-get install -y wget gpg ca-certificates libaio1 \
- && wget https://apt.oracle.com/CONTENT/GPG/oracle-hrms-pub-key.pub \
- && gpg --dearmor oracle-hrms-pub-key.pub --yes -o /usr/share/keyrings/oracle-hrms-pub-key.gpg \
- && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/oracle-hrms-pub-key.gpg] https://apt.oracle.com/oracle-instantclient bookworm main" > /etc/apt/sources.list.d/oracle-instantclient.list \
- && apt-get update \
- && apt-get install -y oracle-instantclient-basic \
- && rm oracle-hrms-pub-key.pub \
- && apt-get clean \
- && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y wget unzip libaio1 \
+    && mkdir -p /opt/oracle \
+    && wget https://download.oracle.com/otn_software/linux/instantclient/instantclient-basiclite-linuxx64.zip \
+    && unzip instantclient-basiclite-linuxx64.zip -d /opt/oracle \
+    && rm instantclient-basiclite-linuxx64.zip \
+    && echo "/opt/oracle/instantclient_23_5" > /etc/ld.so.conf.d/oracle-instantclient.conf \
+    && ldconfig
+
 
 # 4. 파이썬 라이브러리 설치 (requirements.txt 파일이 필요합니다)
 COPY requirements.txt .
