@@ -52,15 +52,37 @@ def close_db_connection(exception):
         db.release()
 
 # --- 3. Spotify API 헬퍼 ---
+@app.route('/api/spotify-token', methods=['GET'])
 def get_spotify_token():
-    auth_header = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
-    response = requests.post(
-        SPOTIFY_AUTH_URL,
-        headers={"Authorization": f"Basic {auth_header}", "Content-Type": "application/x-www-form-urlencoded"},
-        data={"grant_type": "client_credentials"}
-    )
-    response.raise_for_status()
-    return response.json()["access_token"]
+    # 키를 코드에 하드코딩하지 않고, 환경 변수에서 안전하게 불러옵니다.
+    client_id = os.environ.get('SPOTIFY_CLIENT_ID')
+    client_secret = os.environ.get('SPOTIFY_CLIENT_SECRET')
+
+    if not client_id or not client_secret:
+        return jsonify({"error": "Spotify API 키가 서버에 설정되지 않았습니다."}), 500
+
+    # 스포티파이에 토큰 요청
+    auth_url = 'https://accounts.spotify.com/api/token'
+    auth_header = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+    
+    try:
+        response = requests.post(
+            auth_url,
+            headers={
+                'Authorization': f'Basic {auth_header}',
+                'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            data={'grant_type': 'client_credentials'}
+        )
+        
+        response.raise_for_status() # 오류가 있으면 예외 발생
+        token_data = response.json()
+        
+        # 프론트엔드에는 'access_token'만 전달
+        return jsonify({"access_token": token_data.get("access_token")})
+
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": f"스포티파이 토큰 요청 실패: {str(e)}"}), 502
 
 def get_spotify_headers():
     token = get_spotify_token()
