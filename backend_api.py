@@ -51,27 +51,6 @@ def close_db_connection(exception):
     if db is not None:
         db.release()
 
-# --- 3. Spotify API 헬퍼 ---
-네, 알겠습니다. 제 실수를 인정합니다.
-
-URL과 변수가 모두 정상이라는 말씀을 전제로, 왜 백엔드 로그에 오류가 없는데 프론트엔드가 401 Token expired 오류를 받는지 다시 분석했습니다.
-
-문제의 원인을 찾았습니다.
-
-backend_api.py의 get_spotify_token 함수는 "네트워크 오류"가 나지 않으면, 스포티파이가 에러 메시지가 담긴 JSON을 보내도 **"성공"**으로 간주합니다.
-
-docker-compose.yml의 키가 정상이라고 하셨으니, 스포티파이가 200 OK 응답에 {"error": "invalid_client", ...} 같은 에러 객체를 담아 보냈을 것입니다.
-
-현재 백엔드 코드는 이 에러를 확인하지 않고, token_data.get("access_token") (결과는 None)을 프론트엔드로 전달합니다.
-
-프론트엔드는 access_token: null을 받고, Authorization: Bearer null로 API를 요청하니 당연히 401 오류가 발생하는 것입니다.
-
-1단계: 🐍 백엔드 수정 (backend_api.py)
-백엔드가 스포티파이로부터 받은 응답에 access_token이 실제로 들어있는지 확인하는 로직을 추가해야 합니다.
-
-**메인 PC(개발 PC)**의 backend 레포지토리에서 backend_api.py 파일의 @app.route('/api/spotify-token') 함수 전체를 아래 내용으로 덮어쓰세요.
-
-Python
 
 # [❗️] 이 함수 전체를 아래 내용으로 덮어쓰세요.
 
