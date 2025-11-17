@@ -4,13 +4,14 @@ FROM python:3.10-slim
 # 2. 작업 폴더 설정
 WORKDIR /app
 
-# 3. 오라클 클라이언트 설치 (파이썬이 오라클 DB에 접속하기 위해 필수)
-RUN apt-get update && apt-get install -y libaio1 wget unzip \
- && wget https://download.oracle.com/otn_software/linux/instantclient/2112000/instantclient-basic-linux.x64-21.12.0.0.0dbru.zip \
- && unzip instantclient-basic-linux.x64-21.12.0.0.0dbru.zip \
- && sh -c "echo /app/instantclient_21_12 > /etc/ld.so.conf.d/oracle-instantclient.conf" \
- && ldconfig \
- && rm -f *.zip \
+# 3. 오라클 클라이언트 설치 (Zip 다운로드 대신 apt 저장소 방식 사용)
+RUN apt-get update && apt-get install -y wget gpg ca-certificates libaio1 \
+ && wget https://apt.oracle.com/CONTENT/GPG/oracle-hrms-pub-key.pub \
+ && gpg --dearmor oracle-hrms-pub-key.pub --yes -o /usr/share/keyrings/oracle-hrms-pub-key.gpg \
+ && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/oracle-hrms-pub-key.gpg] https://apt.oracle.com/oracle-instantclient bullseye main" > /etc/apt/sources.list.d/oracle-instantclient.list \
+ && apt-get update \
+ && apt-get install -y oracle-instantclient-basic \
+ && rm oracle-hrms-pub-key.pub \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
