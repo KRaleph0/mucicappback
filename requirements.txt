@@ -1,2 +1,4 @@
-flask
+Flask
+Flask-CORS
+requests
 oracledb
