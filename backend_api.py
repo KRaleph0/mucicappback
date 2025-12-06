@@ -167,6 +167,34 @@ def db_check_or_create_track(track_id):
 
 # --- 5. API 라우트 ---
 
+@app.route('/api/spotify-token', methods=['GET'])
+def api_get_token():
+    """프론트엔드에 Spotify Access Token 발급"""
+    try:
+        # Spotify 인증 정보 인코딩
+        auth_str = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}"
+        b64_auth = base64.b64encode(auth_str.encode()).decode()
+        
+        # 실제 Spotify 인증 URL 사용 권장 (기존 코드는 구글 프록시 링크로 보임)
+        # 만약 기존 URL이 작동하지 않는다면 아래 주석을 해제하여 교체하세요.
+        # auth_url = "https://accounts.spotify.com/api/token"
+        auth_url = SPOTIFY_auth_URL 
+
+        res = requests.post(auth_url, 
+                          headers={'Authorization': f'Basic {b64_auth}'}, 
+                          data={'grant_type': 'client_credentials'})
+        
+        if res.status_code == 200:
+            token = res.json().get('access_token')
+            return jsonify({"access_token": token})
+        else:
+            print(f"[Spotify Error] {res.text}")
+            return jsonify({"error": "Spotify Auth Failed"}), res.status_code
+
+    except Exception as e:
+        print(f"[Server Error] {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/admin/update-movies', methods=['POST'])
 def api_update_movies():
     """(관리자용) 박스오피스 강제 업데이트"""
