@@ -8,19 +8,19 @@ from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 
 # --- 1. 설정 (환경 변수 사용 및 공식 URL 적용) ---
-# [보안 수정] 기본값(하드코딩된 키)을 제거했습니다. 반드시 docker-compose.yml에서 주입해야 합니다.
+
+# [보안 수정] 하드코딩된 기본값 제거 (Docker 환경변수로 주입 필수)
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 
-# [필수 수정] 401 오류 해결을 위해 공식 Spotify API 주소로 변경했습니다.
+# [핵심 수정] 불안정한 프록시 대신 'Spotify 공식 API 주소' 사용
 SPOTIFY_auth_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_API_BASE = "https://api.spotify.com/v1"
 
-# API 키가 없으면 서버 시작 시 경고를 띄우거나 에러를 냅니다.
+# API 키 누락 시 경고
 if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-    print("🚨 [경고] SPOTIFY_CLIENT_ID 또는 SECRET이 설정되지 않았습니다! 인증에 실패할 수 있습니다.")
+    print("🚨 [CRITICAL] Spotify API 키가 설정되지 않았습니다! docker-compose.yml을 확인하세요.")
 
-# 다른 키들도 환경변수로 빼는 것을 권장하지만, 일단 기존 유지 (필요 시 os.getenv로 변경하세요)
 KOBIS_API_KEY = os.getenv("KOBIS_API_KEY", "8a96e3a327421cc09bab673061f9aa97")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "5b4d4311c310d9b732b954cc0c9628db")
 
@@ -50,36 +50,41 @@ def close_db(e):
     db = g.pop('db', None)
     if db: db.release()
 
-# --- 2. Spotify 인증 ---
+# --- 2. Spotify 인증 (공식 규격 준수) ---
 def get_spotify_headers():
     if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
         raise Exception("Spotify API Key가 설정되지 않음")
         
+    # Spotify 공식 인증 방식 (Basic Auth)
     auth_str = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}"
     b64_auth = base64.b64encode(auth_str.encode()).decode()
     
-    # 공식 인증 URL 사용
-    res = requests.post(SPOTIFY_auth_URL, 
-                        headers={'Authorization': f'Basic {b64_auth}', 'Content-Type': 'application/x-www-form-urlencoded'}, 
-                        data={'grant_type': 'client_credentials'})
+    headers = {
+        'Authorization': f'Basic {b64_auth}',
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
+    data = {'grant_type': 'client_credentials'}
+    
+    # 공식 URL로 요청
+    res = requests.post(SPOTIFY_auth_URL, headers=headers, data=data)
     
     if res.status_code != 200:
-        print(f"[Spotify 인증 실패] {res.text}")
+        print(f"🚨 [Spotify 인증 실패] 상태 코드: {res.status_code}, 응답: {res.text}")
         raise Exception(f"Spotify Auth Failed: {res.status_code}")
         
     token = res.json().get('access_token')
     return {'Authorization': f'Bearer {token}'}
 
-# --- 3. [핵심] 영화 데이터 수집 및 DB 저장 ---
+# --- 3. 데이터 수집 및 DB 저장 ---
 def update_box_office_data():
     """KOBIS -> TMDB -> Spotify -> Oracle DB 저장"""
     print("[Batch] 박스오피스 업데이트 시작...")
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        headers = get_spotify_headers()
+        headers = get_spotify_headers() # 인증 토큰 획득
 
-        # 1. KOBIS 박스오피스 조회
+        # 1. KOBIS 박스오피스
         target_dt = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
         kobis_url = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json"
         res = requests.get(kobis_url, params={"key": KOBIS_API_KEY, "targetDt": target_dt, "itemPerPage": "10"}).json()
@@ -90,7 +95,7 @@ def update_box_office_data():
             title = movie['movieNm']
             print(f"  [{rank}위] {title} 처리 중...")
 
-            # 2. TMDB 포스터 및 원제 검색
+            # 2. TMDB 검색
             poster_url = None
             search_query = title
             try:
@@ -104,11 +109,10 @@ def update_box_office_data():
                         search_query += f" {m_data['original_title']}"
             except: pass
 
-            # 3. Spotify OST 검색
+            # 3. Spotify 검색 (공식 API)
             search_query += " ost"
-            # 공식 API 사용
-            sp_res = requests.get(f"{SPOTIFY_API_BASE}/search", headers=headers, 
-                                params={"q": search_query, "type": "track", "limit": 1}).json()
+            params = {"q": search_query, "type": "track", "limit": 1, "market": "KR"}
+            sp_res = requests.get(f"{SPOTIFY_API_BASE}/search", headers=headers, params=params).json()
             
             tracks = sp_res.get('tracks', {}).get('items', [])
             if not tracks:
@@ -121,7 +125,7 @@ def update_box_office_data():
             # 4. DB 저장
             db_check_or_create_track(track_id) 
 
-            # 5. 영화 정보 저장
+            # 5. 영화 정보 병합
             try:
                 cursor.execute("""
                     MERGE INTO MOVIES m USING (SELECT :1 AS mid FROM dual) d
@@ -135,7 +139,6 @@ def update_box_office_data():
                     ON (mo.movie_id = d.mid AND mo.track_id = d.tid)
                     WHEN NOT MATCHED THEN INSERT (movie_id, track_id) VALUES (:1, :2)
                 """, [title, track_id])
-                
                 conn.commit()
             except Exception as e:
                 conn.rollback()
@@ -148,7 +151,7 @@ def update_box_office_data():
         print(f"[Batch 오류] {e}")
         return f"업데이트 실패: {e}"
 
-# --- 4. 트랙 저장 및 자동 태깅 ---
+# --- 4. 트랙 저장 (상세 정보) ---
 def db_check_or_create_track(track_id):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -157,17 +160,16 @@ def db_check_or_create_track(track_id):
     if cursor.fetchone(): return
 
     headers = get_spotify_headers()
-    # 공식 API 사용
+    # 공식 API 호출
     track_data = requests.get(f"{SPOTIFY_API_BASE}/tracks/{track_id}", headers=headers).json()
     feats = requests.get(f"{SPOTIFY_API_BASE}/audio-features/{track_id}", headers=headers).json()
 
-    # (여기 INSERT 로직은 DB 스키마에 맞춰 유지)
+    # (여기 INSERT 로직은 DB 스키마에 맞춰 유지 - 생략됨)
     
     tags = []
     if feats:
         energy = feats.get('energy', 0)
         valence = feats.get('valence', 0)
-        
         if energy > 0.7: tags.append('tag:Exciting')
         if energy < 0.4: tags.append('tag:Rest')
         if valence < 0.3: tags.append('tag:Sentimental')
@@ -184,24 +186,30 @@ def db_check_or_create_track(track_id):
 
 @app.route('/api/spotify-token', methods=['GET'])
 def api_get_token():
-    """프론트엔드에 Spotify Access Token 발급"""
+    """프론트엔드에 토큰 발급"""
     try:
+        # 키 검증
         if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
             return jsonify({"error": "Server API Key not configured"}), 500
 
         auth_str = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}"
         b64_auth = base64.b64encode(auth_str.encode()).decode()
         
-        # 공식 인증 URL
-        res = requests.post(SPOTIFY_auth_URL, 
-                          headers={'Authorization': f'Basic {b64_auth}', 'Content-Type': 'application/x-www-form-urlencoded'}, 
-                          data={'grant_type': 'client_credentials'})
+        headers = {
+            'Authorization': f'Basic {b64_auth}',
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+        data = {'grant_type': 'client_credentials'}
+
+        # 공식 인증 URL 사용
+        res = requests.post(SPOTIFY_auth_URL, headers=headers, data=data)
         
         if res.status_code == 200:
             token = res.json().get('access_token')
             return jsonify({"access_token": token})
         else:
-            print(f"[Spotify Error] {res.text}")
+            # 자세한 에러 로그 출력
+            print(f"🚨 [Spotify 토큰 발급 실패] {res.status_code} - {res.text}")
             return jsonify({"error": "Spotify Auth Failed", "details": res.text}), res.status_code
 
     except Exception as e:
@@ -210,7 +218,7 @@ def api_get_token():
 
 @app.route('/api/search', methods=['GET'])
 def api_search():
-    """음악 검색 API (프록시 역할)"""
+    """음악 검색 (프록시)"""
     query = request.args.get('q', '')
     search_type = request.args.get('type', 'track')
     
@@ -228,10 +236,7 @@ def api_search():
         # 공식 API 사용
         response = requests.get(f"{SPOTIFY_API_BASE}/search", headers=headers, params=params)
         
-        if response.status_code != 200:
-            return jsonify(response.json()), response.status_code
-            
-        return jsonify(response.json())
+        return jsonify(response.json()), response.status_code
         
     except Exception as e:
         print(f"[검색 오류] {e}")
@@ -245,8 +250,7 @@ def api_update_movies():
 @app.route('/api/recommend/weather', methods=['GET'])
 def api_recommend_weather():
     condition = request.args.get('condition', 'Clear')
-    tag_map = {'Clear': 'tag:Clear', 'Rain': 'tag:Rain', 'Snow': 'tag:Snow', 'Clouds': 'tag:Cloudy'}
-    target_tag = tag_map.get(condition, 'tag:Clear')
+    target_tag = f"tag:{condition}" if condition in ['Clear', 'Rain', 'Snow'] else 'tag:Clear'
 
     try:
         conn = get_db_connection()
