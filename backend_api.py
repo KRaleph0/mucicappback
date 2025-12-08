@@ -12,8 +12,7 @@ SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 KOBIS_API_KEY = os.getenv("KOBIS_API_KEY")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 
-# Spotify 공식 API 주소 (프록시 대신 공식 주소 사용 권장)
-# 만약 이 주소로 안 되면 https://accounts.spotify.com/api/token 등으로 변경 필요할 수 있음
+# Spotify 공식 API 주소
 SPOTIFY_auth_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_API_BASE = "https://api.spotify.com/v1"
 
@@ -33,7 +32,7 @@ DB_DSN = os.getenv("DB_DSN", "ordb.mirinea.org:1521/XEPDB1")
 app = Flask(__name__)
 CORS(app)
 
-# DB 연결 풀 생성
+# DB 연결 풀
 try:
     db_pool = oracledb.create_pool(user=DB_USER, password=DB_PASSWORD, dsn=DB_DSN, min=1, max=5)
     print("[DB] Oracle Pool 생성 완료.")
@@ -49,7 +48,7 @@ def get_db_connection():
 @app.teardown_appcontext
 def close_db(e):
     db = g.pop('db', None)
-    if db: db.close() # [수정] release() -> close() (최신 oracledb 문법)
+    if db: db.close()
 
 # --- 2. Spotify 인증 ---
 def get_spotify_headers():
@@ -72,20 +71,25 @@ def get_spotify_headers():
     token = res.json().get('access_token')
     return {'Authorization': f'Bearer {token}'}
 
-# --- 3. 영화 장르 조회 (KOBIS) ---
+# --- 3. 영화 장르 조회 (movieapi.py 로직 통합) ---
 def get_movie_genre(movie_name):
+    """KOBIS 영화 목록 API를 호출하여 장르 정보를 가져옴"""
     params = {'key': KOBIS_API_KEY, 'movieNm': movie_name}
     try:
         response = requests.get(KOBIS_MOVIE_LIST_URL, params=params)
         data = response.json()
         movie_list = data.get('movieListResult', {}).get('movieList', [])
+        
         if movie_list:
-            # 첫 번째 결과의 장르 문자열 반환 (예: "액션,드라마")
+            # 첫 번째 검색 결과의 장르 문자열 반환 (예: "액션,범죄")
             genre_str = movie_list[0].get('genreAlt', '')
+            print(f"    🔍 장르 발견: {movie_name} -> {genre_str}")
             return genre_str.split(',') if genre_str else []
+        
+        print(f"    ⚠️ 장르 정보 없음: {movie_name}")
         return []
     except Exception as e:
-        print(f"⚠️ 장르 조회 실패 ({movie_name}): {e}")
+        print(f"    ⚠️ 장르 조회 에러 ({movie_name}): {e}")
         return []
 
 # --- 4. 트랙 저장 및 장르 태깅 함수 ---
@@ -115,20 +119,32 @@ def db_save_track_with_genre_tags(track_id, genres, cursor, headers):
             """, [track_id, track_title, preview_url, artist_name, album_id])
             
         except Exception as e:
-            print(f"⚠️ 트랙 정보 저장 실패 ({track_id}): {e}")
+            print(f"    ⚠️ 트랙 정보 저장 실패 ({track_id}): {e}")
             return # 트랙 저장이 안 되면 태그 저장도 스킵
 
-    # 2. 영화 장르를 음악 태그로 매핑하여 저장
+    # 2. [핵심] 영화 장르를 음악 태그로 매핑하여 저장
+    # KOBIS 장르명 -> 우리 시스템 태그 ID
     genre_map = {
-        "액션": "tag:Action", "SF": "tag:SF", "코미디": "tag:Exciting",
-        "드라마": "tag:Sentimental", "멜로/로맨스": "tag:Romance",
-        "공포": "tag:Tension", "스릴러": "tag:Tension", "애니메이션": "tag:Animation"
+        "액션": "tag:Action",
+        "SF": "tag:SF", 
+        "코미디": "tag:Exciting",
+        "드라마": "tag:Sentimental", 
+        "멜로": "tag:Romance",
+        "로맨스": "tag:Romance",
+        "공포": "tag:Tension", 
+        "스릴러": "tag:Tension", 
+        "범죄": "tag:Tension",
+        "애니메이션": "tag:Animation",
+        "가족": "tag:Rest",
+        "뮤지컬": "tag:Pop"
     }
     
-    tags_to_add = ["tag:MovieOST"] # 기본 태그
+    tags_to_add = set(["tag:MovieOST"]) # 기본 태그 (중복 방지용 set)
+    
     for g in genres:
-        if g in genre_map:
-            tags_to_add.append(genre_map[g])
+        for key, tag in genre_map.items():
+            if key in g: # 부분 일치 허용 (예: "멜로/로맨스" -> "멜로" 매칭)
+                tags_to_add.add(tag)
     
     # DB에 태그 저장
     for tag_id in tags_to_add:
@@ -148,15 +164,19 @@ def update_box_office_data():
         res = requests.get(KOBIS_BOXOFFICE_URL, params={"key": KOBIS_API_KEY, "targetDt": target_dt, "itemPerPage": "10"}).json()
         movie_list = res.get("boxOfficeResult", {}).get("dailyBoxOfficeList", [])
 
+        if not movie_list:
+            print("⚠️ KOBIS 박스오피스 데이터가 비어있습니다.")
+            return "박스오피스 데이터 없음"
+
         for movie in movie_list:
             rank = int(movie['rank'])
             title = movie['movieNm']
-            print(f"  [{rank}위] {title} 처리 중...")
+            print(f"\n[Rank {rank}] {title} 처리 중...")
 
-            # 영화 장르 조회
+            # 1. 장르 조회 (통합된 함수 호출)
             genres = get_movie_genre(title)
 
-            # TMDB 포스터 검색
+            # 2. TMDB 포스터 검색
             poster_url = None
             try:
                 tmdb_res = requests.get("https://api.themoviedb.org/3/search/movie", 
@@ -167,7 +187,7 @@ def update_box_office_data():
                         poster_url = f"https://image.tmdb.org/t/p/w500{m_data['poster_path']}"
             except: pass
 
-            # Spotify OST 검색
+            # 3. Spotify OST 검색
             search_query = f"{title} ost"
             params = {"q": search_query, "type": "track", "limit": 1, "market": "KR"}
             try:
@@ -178,15 +198,16 @@ def update_box_office_data():
                 if tracks:
                     track = tracks[0]
                     track_id = track['id']
-                    # 트랙 저장 및 장르 태그 매핑
+                    # [핵심] 트랙 저장 및 장르 태그 매핑 실행
                     db_save_track_with_genre_tags(track_id, genres, cursor, headers)
+                else:
+                    print("    ⚠️ Spotify 결과 없음")
             except Exception as e:
-                print(f"    ⚠️ Spotify 검색 실패: {e}")
+                print(f"    ⚠️ Spotify 검색 오류: {e}")
                 track_id = None
 
-            # 영화 정보 저장 및 매핑
+            # 4. 영화 정보 저장
             try:
-                # 영화 정보 저장
                 cursor.execute("""
                     MERGE INTO MOVIES m USING (SELECT :1 AS mid FROM dual) d
                     ON (m.movie_id = d.mid)
@@ -194,7 +215,6 @@ def update_box_office_data():
                     WHEN NOT MATCHED THEN INSERT (movie_id, title, rank, poster_url) VALUES (:1, :4, :2, :3)
                 """, [title, rank, poster_url, title])
 
-                # 영화-OST 연결 (OST를 찾은 경우에만)
                 if track_id:
                     cursor.execute("""
                         MERGE INTO MOVIE_OSTS mo USING (SELECT :1 AS mid, :2 AS tid FROM dual) d
@@ -205,12 +225,12 @@ def update_box_office_data():
                 conn.commit()
             except Exception as e:
                 conn.rollback()
-                print(f"    -> DB 저장 실패: {e}")
+                print(f"    ❌ DB 저장 실패: {e}")
 
-        print("[Batch] 업데이트 완료")
+        print("\n[Batch] 업데이트 완료")
         return f"{len(movie_list)}개 영화 업데이트 완료"
     except Exception as e:
-        print(f"[Batch 오류] {e}")
+        print(f"[Batch 치명적 오류] {e}")
         return f"업데이트 실패: {e}"
 
 # --- 6. API 라우트 ---
@@ -242,14 +262,13 @@ def api_update_movies():
     msg = update_box_office_data()
     return jsonify({"message": msg})
 
-# [NEW] 실시간 TTL 생성 API (LEFT JOIN 적용됨)
 @app.route('/api/data/box-office.ttl', methods=['GET'])
 def get_box_office_ttl():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # [수정] 음악 정보가 없어도 영화 정보는 나오도록 LEFT JOIN 사용
+        # 음악 정보가 없어도 영화 정보는 나오도록 LEFT JOIN 사용
         query = """
             SELECT 
                 m.movie_id, m.title, m.rank, m.poster_url,
@@ -269,36 +288,23 @@ def get_box_office_ttl():
 """
         for row in rows:
             mid, mtitle, rank, mposter, ttitle, artist, preview, cover = row
-            
-            # ID 인코딩 (Base64)
             m_uri = base64.urlsafe_b64encode(mid.encode()).decode().rstrip("=")
-            
-            # None 값 처리
             mposter = mposter or "img/playlist-placeholder.png"
             ttitle = ttitle or "OST 정보 없음"
             artist = artist or "-"
             cover = cover or "img/playlist-placeholder.png"
             preview = preview or ""
 
-            # 영화 데이터
             ttl += f"""
 <https://knowledgemap.kr/komc/resource/movie/{m_uri}> a schema:Movie ;
-    schema:name "{mtitle}" ;
-    schema:image "{mposter}" ;
-    komc:rank {rank} .
-"""
-            # 트랙 데이터 (영화와 연결)
-            ttl += f"""
+    schema:name "{mtitle}" ; schema:image "{mposter}" ; komc:rank {rank} .
 <https://knowledgemap.kr/komc/resource/track/{m_uri}_ost> a schema:MusicRecording ;
-    schema:name "{ttitle}" ;
-    schema:byArtist "{artist}" ;
-    schema:image "{cover}" ;
+    schema:name "{ttitle}" ; schema:byArtist "{artist}" ; schema:image "{cover}" ;
     schema:audio "{preview}" ;
     komc:featuredIn <https://knowledgemap.kr/komc/resource/movie/{m_uri}> .
 """
         return Response(ttl, mimetype='text/turtle')
     except Exception as e:
-        print(f"❌ TTL 생성 오류: {e}")
         return f"# Error: {e}", 500
 
 if __name__ == '__main__':
