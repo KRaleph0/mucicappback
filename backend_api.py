@@ -48,7 +48,7 @@ def get_db_connection():
 @app.teardown_appcontext
 def close_db(e):
     db = g.pop('db', None)
-    if db: db.release()
+    if db: db.close()
 
 # --- 2. Spotify 인증 ---
 def get_spotify_headers():
