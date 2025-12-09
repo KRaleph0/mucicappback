@@ -3,34 +3,29 @@ import requests
 import base64
 import oracledb
 import re
-import random
-import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, g, Response
 from flask_cors import CORS
-from skos_manager import SkosManager
 
 # --- 1. 설정 ---
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 KOBIS_API_KEY = os.getenv("KOBIS_API_KEY")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
-DATA_GO_KR_API_KEY = os.getenv("DATA_GO_KR_API_KEY") # [NEW] 공공데이터 키
-skos_manager = SkosManager("skos-definition.ttl")
+DATA_GO_KR_API_KEY = os.getenv("DATA_GO_KR_API_KEY")
+
 SPOTIFY_auth_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_API_BASE = "https://api.spotify.com/v1"
 
 KOBIS_BOXOFFICE_URL = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json"
 KOBIS_MOVIE_INFO_URL = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/movie/searchMovieInfo.json"
 KOBIS_MOVIE_LIST_URL = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/movie/searchMovieList.json"
-
-# [NEW] 공공데이터 URL
 WEATHER_API_URL = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getUltraSrtNcst"
 HOLIDAY_API_URL = "http://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDeInfo"
 
 if not all([SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, KOBIS_API_KEY, TMDB_API_KEY]):
-    print("🚨 [CRITICAL] 주요 API 키 설정 누락!")
+    print("🚨 [CRITICAL] API 키 설정 누락! docker-compose.yml을 확인하세요.")
 
 DB_USER = os.getenv("DB_USER", "admin")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "password")
@@ -71,83 +66,64 @@ def get_similarity(a, b):
     return SequenceMatcher(None, clean_text(a), clean_text(b)).ratio()
 
 def get_spotify_headers():
+    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+        raise Exception("Spotify API Key가 설정되지 않음")
     auth_str = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}"
     b64_auth = base64.b64encode(auth_str.encode()).decode()
-    res = requests.post(SPOTIFY_auth_URL, headers={'Authorization': f'Basic {b64_auth}', 'Content-Type': 'application/x-www-form-urlencoded'}, data={'grant_type': 'client_credentials'})
+    headers = {
+        'Authorization': f'Basic {b64_auth}',
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
+    data = {'grant_type': 'client_credentials'}
+    res = requests.post(SPOTIFY_auth_URL, headers=headers, data=data)
+    if res.status_code != 200: raise Exception(f"Spotify Auth Failed: {res.status_code}")
     return {'Authorization': f'Bearer {res.json().get("access_token")}'}
 
 def ms_to_iso_duration(ms):
     if not ms: return "PT0M0S"
-    s = int((ms/1000)%60); m = int((ms/(1000*60))%60)
-    return f"PT{m}M{s}S"
+    seconds = int((ms / 1000) % 60)
+    minutes = int((ms / (1000 * 60)) % 60)
+    return f"PT{minutes}M{seconds}S"
 
 def extract_spotify_id(url):
     if len(url) == 22 and re.match(r'^[a-zA-Z0-9]+$', url): return url
     match = re.search(r'track/([a-zA-Z0-9]{22})', url)
     return match.group(1) if match else None
 
-# --- [NEW] 3. 공공데이터 조회 (날씨/특일) ---
-
+# --- 3. 공공데이터 조회 ---
 def get_current_weather():
-    """기상청 초단기실황 조회 (서울 기준: 60, 127)"""
     if not DATA_GO_KR_API_KEY: return None
-    
-    # 현재 시각 (정시 기준)
     now = datetime.now()
     base_date = now.strftime("%Y%m%d")
-    # API 제공 시각에 맞춰 조정 (매시간 40분 이후 제공)
-    if now.minute < 45: 
-        now -= timedelta(hours=1)
+    if now.minute < 45: now -= timedelta(hours=1)
     base_time = now.strftime("%H00")
-
-    params = {
-        'serviceKey': DATA_GO_KR_API_KEY, # Decoding Key 사용 권장
-        'pageNo': '1', 'numOfRows': '10', 'dataType': 'JSON',
-        'base_date': base_date, 'base_time': base_time,
-        'nx': '60', 'ny': '127' # 서울 종로구 좌표 (기본값)
-    }
-
+    params = {'serviceKey': DATA_GO_KR_API_KEY, 'pageNo': '1', 'numOfRows': '10', 'dataType': 'JSON', 'base_date': base_date, 'base_time': base_time, 'nx': '60', 'ny': '127'}
     try:
         res = requests.get(WEATHER_API_URL, params=params, timeout=5)
         items = res.json().get('response', {}).get('body', {}).get('items', {}).get('item', [])
-        
-        # PTY: 강수형태 (0:없음, 1:비, 2:비/눈, 3:눈, 5:빗방울, 6:진눈깨비, 7:눈날림)
         pty = next((item['obsrValue'] for item in items if item['category'] == 'PTY'), "0")
-        
         if pty in ["1", "5", "2", "6"]: return "Rain"
         if pty in ["3", "7"]: return "Snow"
-        return "Clear" # 강수 없으면 맑음으로 간주
-    except Exception as e:
-        print(f"⚠️ 날씨 조회 실패: {e}")
-        return "Clear" # 기본값
+        return "Clear"
+    except: return "Clear"
 
 def get_today_holiday():
-    """천문연구원 특일 정보 조회"""
     if not DATA_GO_KR_API_KEY: return None
-    
     now = datetime.now()
-    params = {
-        'serviceKey': DATA_GO_KR_API_KEY,
-        'solYear': now.year,
-        'solMonth': f"{now.month:02d}",
-        '_type': 'json'
-    }
-    
+    params = {'serviceKey': DATA_GO_KR_API_KEY, 'solYear': now.year, 'solMonth': f"{now.month:02d}", '_type': 'json'}
     try:
         res = requests.get(HOLIDAY_API_URL, params=params, timeout=5)
-        # 결과가 하나면 dict, 여러개면 list로 옴 (공공데이터 특성)
         items = res.json().get('response', {}).get('body', {}).get('items', {})
         item_list = items.get('item', [])
         if isinstance(item_list, dict): item_list = [item_list]
-
         today_str = now.strftime("%Y%m%d")
         for item in item_list:
             if str(item.get('locdate')) == today_str and item.get('isHoliday') == 'Y':
-                return item.get('dateName') # 예: "크리스마스", "광복절"
+                return item.get('dateName')
         return None
     except: return None
 
-# --- 4. KOBIS & Spotify 로직 (기존 유지) ---
+# --- 4. KOBIS & Spotify ---
 def get_kobis_metadata(movie_name):
     params = {'key': KOBIS_API_KEY, 'movieNm': movie_name}
     try:
@@ -222,18 +198,16 @@ def save_track_details(track_id, cursor, headers, genres=[]):
     except Exception as e: return None
 
 def update_box_office_data():
-    # (기존 로직과 동일 - 생략 없이 전체 코드 사용)
+    # ... (기존과 동일)
     print("[Batch] 박스오피스 업데이트 시작...")
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         headers = get_spotify_headers()
-
         target_dt = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
         res = requests.get(KOBIS_BOXOFFICE_URL, params={"key": KOBIS_API_KEY, "targetDt": target_dt, "itemPerPage": "10"}).json()
         movie_list = res.get("boxOfficeResult", {}).get("dailyBoxOfficeList", [])
         if not movie_list: return "데이터 없음"
-
         for movie in movie_list:
             rank = int(movie['rank']); title = movie['movieNm']
             print(f"Processing: {title}")
@@ -243,12 +217,10 @@ def update_box_office_data():
                 tmdb_res = requests.get("https://api.themoviedb.org/3/search/movie", params={"api_key": TMDB_API_KEY, "query": title, "language": "ko-KR"}).json()
                 if tmdb_res.get('results'): poster_url = f"https://image.tmdb.org/t/p/w500{tmdb_res['results'][0]['poster_path']}"
             except: pass
-
             try:
                 cursor.execute("MERGE INTO MOVIES m USING (SELECT :mid AS mid FROM dual) d ON (m.movie_id=d.mid) WHEN MATCHED THEN UPDATE SET rank=:rank, poster_url=:poster WHEN NOT MATCHED THEN INSERT (movie_id, title, rank, poster_url) VALUES (:mid, :title, :rank, :poster)", {'mid':title, 'title':title, 'rank':rank, 'poster':poster_url})
                 conn.commit()
             except: pass
-
             matched_track = find_best_track([title_og, title_en, title], headers)
             if matched_track:
                 tid = matched_track['id']
@@ -260,53 +232,15 @@ def update_box_office_data():
                 except: pass
         return "업데이트 완료"
     except Exception as e: return f"Error: {e}"
-    
-def save_track_details(track_id, cursor, headers, genres=[]):
-    # ... (트랙/앨범 저장 로직은 그대로 유지) ...
 
-    # --- 태그 저장 로직 (업그레이드) ---
-    tags = set(["tag:Spotify"])
-    if genres: tags.add("tag:MovieOST")
-    
-    # 1. 오디오 특징 기반 태그 (기존 유지)
-    # ... (energy, valence 로직) ...
-
-    # 2. 영화 장르 매핑 (기존 유지)
-    genre_map = { ... } # (기존 맵)
-    for g in genres:
-        for k, v in genre_map.items():
-            if k in g: tags.add(v)
-            
-    # 3. [NEW] SKOS 계층 구조를 이용한 태그 확장! ⭐
-    # 현재 수집된 태그들의 '상위 태그'를 모두 찾아와서 추가합니다.
-    final_tags = set()
-    for t in tags:
-        # 예: t가 "tag:KPop"이면 -> ["tag:KPop", "tag:Pop", "tag:Genre"] 반환
-        expanded = skos_manager.get_broader_tags(t)
-        final_tags.update(expanded)
-
-    # 4. DB 저장 (확장된 태그 리스트로 저장)
-    for tag_id in final_tags:
-        try:
-            cursor.execute("""
-                MERGE INTO TRACK_TAGS USING dual ...
-            """, {'tid': track_id, 'tag': tag_id})
-        except: pass
-    
-    cursor.connection.commit()
-    return t_data
-# --- 7. API 라우트 ---
-
-# [NEW] 상황 기반 추천 API (날씨, 특일)
+# --- API ---
+# [수정됨] 상황 기반 추천 (태그 목록도 함께 반환)
 @app.route('/api/recommend/context', methods=['GET'])
 def api_recommend_context():
     try:
-        # 1. 상황 파악
         weather = get_current_weather() or "Clear"
         holiday = get_today_holiday()
         
-        # 2. 태그 매핑 (Weather/Holiday -> Audio Feature Tag)
-        # 우리 DB에는 날씨 태그가 없으므로 분위기 태그로 변환
         target_tags = []
         context_msg = ""
 
@@ -323,11 +257,10 @@ def api_recommend_context():
             context_msg = "☀️ 맑은 날씨엔 드라이브 음악이죠!"
             target_tags = ['tag:Exciting', 'tag:Pop']
 
-        # 3. DB 조회 (태그에 맞는 곡 랜덤 5개)
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # SQL IN 절 동적 생성
+        # 태그에 맞는 곡 조회 (랜덤)
         bind_vars = {f't{i}': t for i, t in enumerate(target_tags)}
         placeholders = ', '.join([f':t{i}' for i in range(len(target_tags))])
         
@@ -343,62 +276,52 @@ def api_recommend_context():
         
         tracks = []
         for row in cursor.fetchall():
-            tracks.append({
-                "title": row[0], "artist": row[1], "cover": row[2], "preview": row[3]
-            })
+            tracks.append({"title": row[0], "artist": row[1], "cover": row[2], "preview": row[3]})
             
         return jsonify({
             "message": context_msg,
             "weather": weather,
             "holiday": holiday,
-            "tracks": tracks
+            "tracks": tracks,
+            # [NEW] 태그 목록도 함께 전송 (tag: 접두사 제거)
+            "tags": [t.replace('tag:', '') for t in target_tags]
         })
 
     except Exception as e:
-        print(f"[추천 오류] {e}")
         return jsonify({"error": str(e)}), 500
 
-# (기존 API들 유지: login, signup, admin logs, update-ost, search, track detail, box-office ttl)
+# (나머지 API들 그대로 유지)
 @app.route('/api/auth/signup', methods=['POST'])
 def api_signup():
-    d = request.json
-    uid, pw, nick = d.get('id'), d.get('password'), d.get('nickname', 'User')
-    if not uid or not pw: return jsonify({"error": "Missing fields"}), 400
+    d = request.json; uid, pw, nick = d.get('id'), d.get('password'), d.get('nickname', 'User')
     try:
         conn = get_db_connection(); cur = conn.cursor()
         cur.execute("SELECT user_id FROM USERS WHERE user_id=:1", [uid])
-        if cur.fetchone(): return jsonify({"error": "ID already exists"}), 409
+        if cur.fetchone(): return jsonify({"error": "ID exists"}), 409
         cur.execute("INSERT INTO USERS (user_id, password, nickname, role) VALUES (:1, :2, :3, 'user')", [uid, generate_password_hash(pw), nick])
-        conn.commit()
-        return jsonify({"message": "Signup successful"})
+        conn.commit(); return jsonify({"message": "Success"})
     except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route('/api/auth/login', methods=['POST'])
 def api_login():
-    d = request.json
-    uid, pw = d.get('id'), d.get('password')
+    d = request.json; uid, pw = d.get('id'), d.get('password')
     try:
         conn = get_db_connection(); cur = conn.cursor()
         cur.execute("SELECT user_id, password, nickname, profile_img, role FROM USERS WHERE user_id=:1", [uid])
         u = cur.fetchone()
-        if u and check_password_hash(u[1], pw):
-            return jsonify({"message": "Login success", "user": {"id": u[0], "nickname": u[2], "profile_img": u[3], "role": u[4]}})
-        return jsonify({"error": "Invalid credentials"}), 401
+        if u and check_password_hash(u[1], pw): return jsonify({"message": "Login success", "user": {"id": u[0], "nickname": u[2], "profile_img": u[3], "role": u[4]}})
+        return jsonify({"error": "Invalid"}), 401
     except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route('/api/admin/logs', methods=['POST'])
-def api_get_admin_logs():
-    d = request.json
-    uid = d.get('user_id')
+def api_logs():
+    d = request.json; uid = d.get('user_id')
     try:
         conn = get_db_connection(); cur = conn.cursor()
         cur.execute("SELECT role FROM USERS WHERE user_id=:1", [uid])
-        row = cur.fetchone()
-        if not row or row[0] != 'admin': return jsonify({"error": "No permission"}), 403
+        if cur.fetchone()[0] != 'admin': return jsonify({"error": "No permission"}), 403
         cur.execute("SELECT target_id, previous_value, new_value, user_id, created_at, user_ip FROM MODIFICATION_LOGS ORDER BY created_at DESC FETCH FIRST 50 ROWS ONLY")
-        logs = []
-        for r in cur.fetchall():
-            logs.append({"movie": r[0], "old": r[1], "new": r[2], "user": r[3], "date": r[4].strftime("%Y-%m-%d %H:%M"), "ip": r[5]})
+        logs = [{"movie":r[0], "old":r[1], "new":r[2], "user":r[3], "date":r[4].strftime("%Y-%m-%d %H:%M"), "ip":r[5]} for r in cur.fetchall()]
         return jsonify(logs)
     except Exception as e: return jsonify({"error": str(e)}), 500
 
@@ -451,12 +374,7 @@ def get_ttl():
                 tl = [x[0].replace('tag:', '') for x in tcur.fetchall()]
                 if tl: tags = f"    komc:relatedTag tag:{', tag:'.join(tl)} ;"
             t_uri = tid if tid else f"{m_uri}_ost"
-            ttl += f"""
-<https://knowledgemap.kr/komc/resource/movie/{m_uri}> a schema:Movie ; schema:name "{mt}" ; schema:image "{mp}" ; komc:rank {rk} .
-<https://knowledgemap.kr/komc/resource/track/{t_uri}> a schema:MusicRecording ; schema:name "{tt}" ; schema:byArtist "{ar}" ; schema:image "{cov}" ; schema:audio "{pr or ''}" ; komc:featuredIn <https://knowledgemap.kr/komc/resource/movie/{m_uri}> ;
-{tags}
-    schema:genre "Movie Soundtrack" .
-""" 
+            ttl += f"""<https://knowledgemap.kr/komc/resource/movie/{m_uri}> a schema:Movie ; schema:name "{mt}" ; schema:image "{mp}" ; komc:rank {rk} .\n<https://knowledgemap.kr/komc/resource/track/{t_uri}> a schema:MusicRecording ; schema:name "{tt}" ; schema:byArtist "{ar}" ; schema:image "{cov}" ; schema:audio "{pr or ''}" ; komc:featuredIn <https://knowledgemap.kr/komc/resource/movie/{m_uri}> ;\n{tags}\n    schema:genre "Movie Soundtrack" .\n"""
         return Response(ttl, mimetype='text/turtle')
     except Exception as e: return f"# Error: {e}", 500
 
