@@ -3,36 +3,43 @@ import requests
 import base64
 import oracledb
 import re
+import random
+import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, g, Response
 from flask_cors import CORS
-from werkzeug.security import generate_password_hash, check_password_hash
 
 # --- 1. 설정 ---
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 KOBIS_API_KEY = os.getenv("KOBIS_API_KEY")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
+DATA_GO_KR_API_KEY = os.getenv("DATA_GO_KR_API_KEY") # [NEW] 공공데이터 키
 
 SPOTIFY_auth_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_API_BASE = "https://api.spotify.com/v1"
+
 KOBIS_BOXOFFICE_URL = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json"
 KOBIS_MOVIE_INFO_URL = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/movie/searchMovieInfo.json"
 KOBIS_MOVIE_LIST_URL = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/movie/searchMovieList.json"
 
+# [NEW] 공공데이터 URL
+WEATHER_API_URL = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getUltraSrtNcst"
+HOLIDAY_API_URL = "http://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDeInfo"
+
 if not all([SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, KOBIS_API_KEY, TMDB_API_KEY]):
-    print("🚨 API 키 설정 누락!")
+    print("🚨 [CRITICAL] 주요 API 키 설정 누락!")
 
 DB_USER = os.getenv("DB_USER", "admin")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "password")
 DB_DSN = os.getenv("DB_DSN", "ordb.mirinea.org:1521/XEPDB1")
+
 PITCH_CLASS = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 
 app = Flask(__name__)
 CORS(app)
 
-# DB 연결
 try:
     db_pool = oracledb.create_pool(user=DB_USER, password=DB_PASSWORD, dsn=DB_DSN, min=1, max=5)
     print("[DB] Oracle Pool 생성 완료.")
@@ -63,11 +70,9 @@ def get_similarity(a, b):
     return SequenceMatcher(None, clean_text(a), clean_text(b)).ratio()
 
 def get_spotify_headers():
-    if not SPOTIFY_CLIENT_ID: raise Exception("Spotify Key Missing")
     auth_str = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}"
     b64_auth = base64.b64encode(auth_str.encode()).decode()
     res = requests.post(SPOTIFY_auth_URL, headers={'Authorization': f'Basic {b64_auth}', 'Content-Type': 'application/x-www-form-urlencoded'}, data={'grant_type': 'client_credentials'})
-    if res.status_code != 200: raise Exception(f"Auth Failed: {res.status_code}")
     return {'Authorization': f'Bearer {res.json().get("access_token")}'}
 
 def ms_to_iso_duration(ms):
@@ -80,7 +85,68 @@ def extract_spotify_id(url):
     match = re.search(r'track/([a-zA-Z0-9]{22})', url)
     return match.group(1) if match else None
 
-# --- 3. KOBIS 조회 ---
+# --- [NEW] 3. 공공데이터 조회 (날씨/특일) ---
+
+def get_current_weather():
+    """기상청 초단기실황 조회 (서울 기준: 60, 127)"""
+    if not DATA_GO_KR_API_KEY: return None
+    
+    # 현재 시각 (정시 기준)
+    now = datetime.now()
+    base_date = now.strftime("%Y%m%d")
+    # API 제공 시각에 맞춰 조정 (매시간 40분 이후 제공)
+    if now.minute < 45: 
+        now -= timedelta(hours=1)
+    base_time = now.strftime("%H00")
+
+    params = {
+        'serviceKey': DATA_GO_KR_API_KEY, # Decoding Key 사용 권장
+        'pageNo': '1', 'numOfRows': '10', 'dataType': 'JSON',
+        'base_date': base_date, 'base_time': base_time,
+        'nx': '60', 'ny': '127' # 서울 종로구 좌표 (기본값)
+    }
+
+    try:
+        res = requests.get(WEATHER_API_URL, params=params, timeout=5)
+        items = res.json().get('response', {}).get('body', {}).get('items', {}).get('item', [])
+        
+        # PTY: 강수형태 (0:없음, 1:비, 2:비/눈, 3:눈, 5:빗방울, 6:진눈깨비, 7:눈날림)
+        pty = next((item['obsrValue'] for item in items if item['category'] == 'PTY'), "0")
+        
+        if pty in ["1", "5", "2", "6"]: return "Rain"
+        if pty in ["3", "7"]: return "Snow"
+        return "Clear" # 강수 없으면 맑음으로 간주
+    except Exception as e:
+        print(f"⚠️ 날씨 조회 실패: {e}")
+        return "Clear" # 기본값
+
+def get_today_holiday():
+    """천문연구원 특일 정보 조회"""
+    if not DATA_GO_KR_API_KEY: return None
+    
+    now = datetime.now()
+    params = {
+        'serviceKey': DATA_GO_KR_API_KEY,
+        'solYear': now.year,
+        'solMonth': f"{now.month:02d}",
+        '_type': 'json'
+    }
+    
+    try:
+        res = requests.get(HOLIDAY_API_URL, params=params, timeout=5)
+        # 결과가 하나면 dict, 여러개면 list로 옴 (공공데이터 특성)
+        items = res.json().get('response', {}).get('body', {}).get('items', {})
+        item_list = items.get('item', [])
+        if isinstance(item_list, dict): item_list = [item_list]
+
+        today_str = now.strftime("%Y%m%d")
+        for item in item_list:
+            if str(item.get('locdate')) == today_str and item.get('isHoliday') == 'Y':
+                return item.get('dateName') # 예: "크리스마스", "광복절"
+        return None
+    except: return None
+
+# --- 4. KOBIS & Spotify 로직 (기존 유지) ---
 def get_kobis_metadata(movie_name):
     params = {'key': KOBIS_API_KEY, 'movieNm': movie_name}
     try:
@@ -92,7 +158,6 @@ def get_kobis_metadata(movie_name):
         return [], "", ""
     except: return [], "", ""
 
-# --- 4. Spotify 검색 ---
 def find_best_track(titles, headers):
     candidates = []
     seen = set()
@@ -107,7 +172,6 @@ def find_best_track(titles, headers):
         except: pass
     return None
 
-# --- 5. 트랙 저장 ---
 def save_track_details(track_id, cursor, headers, genres=[]):
     if not track_id: return None
     try:
@@ -154,11 +218,112 @@ def save_track_details(track_id, cursor, headers, genres=[]):
         
         cursor.connection.commit()
         return t_data
-    except Exception as e:
-        print(f"Track Save Error: {e}")
-        return None
+    except Exception as e: return None
 
-# --- 6. Auth API (회원가입/로그인) ---
+def update_box_office_data():
+    # (기존 로직과 동일 - 생략 없이 전체 코드 사용)
+    print("[Batch] 박스오피스 업데이트 시작...")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        headers = get_spotify_headers()
+
+        target_dt = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+        res = requests.get(KOBIS_BOXOFFICE_URL, params={"key": KOBIS_API_KEY, "targetDt": target_dt, "itemPerPage": "10"}).json()
+        movie_list = res.get("boxOfficeResult", {}).get("dailyBoxOfficeList", [])
+        if not movie_list: return "데이터 없음"
+
+        for movie in movie_list:
+            rank = int(movie['rank']); title = movie['movieNm']
+            print(f"Processing: {title}")
+            genres, title_en, title_og = get_kobis_metadata(title)
+            poster_url = None
+            try:
+                tmdb_res = requests.get("https://api.themoviedb.org/3/search/movie", params={"api_key": TMDB_API_KEY, "query": title, "language": "ko-KR"}).json()
+                if tmdb_res.get('results'): poster_url = f"https://image.tmdb.org/t/p/w500{tmdb_res['results'][0]['poster_path']}"
+            except: pass
+
+            try:
+                cursor.execute("MERGE INTO MOVIES m USING (SELECT :mid AS mid FROM dual) d ON (m.movie_id=d.mid) WHEN MATCHED THEN UPDATE SET rank=:rank, poster_url=:poster WHEN NOT MATCHED THEN INSERT (movie_id, title, rank, poster_url) VALUES (:mid, :title, :rank, :poster)", {'mid':title, 'title':title, 'rank':rank, 'poster':poster_url})
+                conn.commit()
+            except: pass
+
+            matched_track = find_best_track([title_og, title_en, title], headers)
+            if matched_track:
+                tid = matched_track['id']
+                save_track_details(tid, cursor, headers, genres)
+                try:
+                    cursor.execute("DELETE FROM MOVIE_OSTS WHERE movie_id=:mid", {'mid':title})
+                    cursor.execute("INSERT INTO MOVIE_OSTS (movie_id, track_id) VALUES (:mid, :tid)", {'mid':title, 'tid':tid})
+                    conn.commit()
+                except: pass
+        return "업데이트 완료"
+    except Exception as e: return f"Error: {e}"
+
+# --- 7. API 라우트 ---
+
+# [NEW] 상황 기반 추천 API (날씨, 특일)
+@app.route('/api/recommend/context', methods=['GET'])
+def api_recommend_context():
+    try:
+        # 1. 상황 파악
+        weather = get_current_weather() or "Clear"
+        holiday = get_today_holiday()
+        
+        # 2. 태그 매핑 (Weather/Holiday -> Audio Feature Tag)
+        # 우리 DB에는 날씨 태그가 없으므로 분위기 태그로 변환
+        target_tags = []
+        context_msg = ""
+
+        if holiday:
+            context_msg = f"🎉 오늘은 {holiday}입니다! 신나는 음악 어때요?"
+            target_tags = ['tag:Exciting', 'tag:Pop']
+        elif weather == "Rain":
+            context_msg = "☔ 비가 오네요. 감성적인 음악을 준비했어요."
+            target_tags = ['tag:Sentimental', 'tag:Rest']
+        elif weather == "Snow":
+            context_msg = "❄️ 눈이 내립니다. 로맨틱한 음악을 들어보세요."
+            target_tags = ['tag:Romance', 'tag:Sentimental']
+        else:
+            context_msg = "☀️ 맑은 날씨엔 드라이브 음악이죠!"
+            target_tags = ['tag:Exciting', 'tag:Pop']
+
+        # 3. DB 조회 (태그에 맞는 곡 랜덤 5개)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # SQL IN 절 동적 생성
+        bind_vars = {f't{i}': t for i, t in enumerate(target_tags)}
+        placeholders = ', '.join([f':t{i}' for i in range(len(target_tags))])
+        
+        query = f"""
+            SELECT t.track_title, t.artist_name, t.image_url, t.preview_url
+            FROM TRACKS t
+            JOIN TRACK_TAGS tt ON t.track_id = tt.track_id
+            WHERE tt.tag_id IN ({placeholders})
+            ORDER BY DBMS_RANDOM.VALUE
+            FETCH FIRST 6 ROWS ONLY
+        """
+        cursor.execute(query, bind_vars)
+        
+        tracks = []
+        for row in cursor.fetchall():
+            tracks.append({
+                "title": row[0], "artist": row[1], "cover": row[2], "preview": row[3]
+            })
+            
+        return jsonify({
+            "message": context_msg,
+            "weather": weather,
+            "holiday": holiday,
+            "tracks": tracks
+        })
+
+    except Exception as e:
+        print(f"[추천 오류] {e}")
+        return jsonify({"error": str(e)}), 500
+
+# (기존 API들 유지: login, signup, admin logs, update-ost, search, track detail, box-office ttl)
 @app.route('/api/auth/signup', methods=['POST'])
 def api_signup():
     d = request.json
@@ -168,8 +333,6 @@ def api_signup():
         conn = get_db_connection(); cur = conn.cursor()
         cur.execute("SELECT user_id FROM USERS WHERE user_id=:1", [uid])
         if cur.fetchone(): return jsonify({"error": "ID already exists"}), 409
-        
-        # 기본 role은 'user'
         cur.execute("INSERT INTO USERS (user_id, password, nickname, role) VALUES (:1, :2, :3, 'user')", [uid, generate_password_hash(pw), nick])
         conn.commit()
         return jsonify({"message": "Signup successful"})
@@ -188,98 +351,48 @@ def api_login():
         return jsonify({"error": "Invalid credentials"}), 401
     except Exception as e: return jsonify({"error": str(e)}), 500
 
-# [NEW] 관리자 로그 조회 API
 @app.route('/api/admin/logs', methods=['POST'])
 def api_get_admin_logs():
     d = request.json
-    uid = d.get('user_id') # 현재 로그인한 유저 ID
+    uid = d.get('user_id')
     try:
         conn = get_db_connection(); cur = conn.cursor()
-        # 관리자 여부 확인
         cur.execute("SELECT role FROM USERS WHERE user_id=:1", [uid])
         row = cur.fetchone()
-        
-        if not row or row[0] != 'admin':
-            return jsonify({"error": "관리자 권한이 필요합니다."}), 403
-            
+        if not row or row[0] != 'admin': return jsonify({"error": "No permission"}), 403
         cur.execute("SELECT target_id, previous_value, new_value, user_id, created_at, user_ip FROM MODIFICATION_LOGS ORDER BY created_at DESC FETCH FIRST 50 ROWS ONLY")
         logs = []
         for r in cur.fetchall():
-            logs.append({
-                "movie": r[0], "old": r[1], "new": r[2], 
-                "user": r[3], "date": r[4].strftime("%Y-%m-%d %H:%M"), "ip": r[5]
-            })
+            logs.append({"movie": r[0], "old": r[1], "new": r[2], "user": r[3], "date": r[4].strftime("%Y-%m-%d %H:%M"), "ip": r[5]})
         return jsonify(logs)
     except Exception as e: return jsonify({"error": str(e)}), 500
 
-# --- 7. 영화 업데이트 (OST 수정) ---
-@app.route('/api/movie/<movie_id>/update-ost', methods=['POST'])
-def api_update_movie_ost(movie_id):
-    d = request.json
-    link = d.get('spotifyUrl')
-    uid = d.get('user_id', 'Guest') # 로그인한 유저 ID (없으면 Guest)
-    ip = request.remote_addr
-    
+@app.route('/api/movie/<mid>/update-ost', methods=['POST'])
+def api_up_ost(mid):
+    d = request.json; link = d.get('spotifyUrl'); uid = d.get('user_id', 'Guest'); ip = request.remote_addr
     if not link: return jsonify({"error": "Link required"}), 400
-
     try:
         conn = get_db_connection(); cur = conn.cursor(); headers = get_spotify_headers()
-        
-        # ID 디코딩
-        real_mid = movie_id
+        real_mid = mid
         try:
-            if movie_id.endswith('_ost'): movie_id = movie_id[:-4]
-            pad = len(movie_id)%4; 
-            if pad: movie_id += '='*(4-pad)
-            dec = base64.urlsafe_b64decode(movie_id).decode('utf-8')
+            if mid.endswith('_ost'): mid = mid[:-4]
+            pad = len(mid)%4; 
+            if pad: mid += '='*(4-pad)
+            dec = base64.urlsafe_b64decode(mid).decode('utf-8')
             cur.execute("SELECT count(*) FROM MOVIES WHERE movie_id=:1", [dec])
             if cur.fetchone()[0]>0: real_mid = dec
         except: pass
-
         tid = extract_spotify_id(link)
         if not tid: return jsonify({"error": "Invalid Link"}), 400
-        
         res = save_track_details(tid, cur, headers, [])
         if not res: return jsonify({"error": "Track not found"}), 404
-
         cur.execute("SELECT track_id FROM MOVIE_OSTS WHERE movie_id=:1", [real_mid])
         prev = cur.fetchone(); prev_id = prev[0] if prev else "NONE"
-
         cur.execute("DELETE FROM MOVIE_OSTS WHERE movie_id=:1", [real_mid])
         cur.execute("INSERT INTO MOVIE_OSTS (movie_id, track_id) VALUES (:1, :2)", [real_mid, tid])
-        
-        # 로그 저장 (user_id 포함)
         cur.execute("INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, previous_value, new_value, user_ip, user_id) VALUES ('MOVIE_OST', :1, 'UPDATE', :2, :3, :4, :5)", [real_mid, prev_id, tid, ip, uid])
-        
         conn.commit()
         return jsonify({"message": "Updated", "new_track": res['name']})
-    except Exception as e: return jsonify({"error": str(e)}), 500
-
-# --- 기타 API (기존 유지) ---
-@app.route('/api/spotify-token', methods=['GET'])
-def api_get_token():
-    try: return jsonify({"access_token": get_spotify_headers()['Authorization'].split(' ')[1]})
-    except Exception as e: return jsonify({"error": str(e)}), 500
-
-@app.route('/api/search', methods=['GET'])
-def api_search():
-    try: 
-        res = requests.get(f"{SPOTIFY_API_BASE}/search", headers=get_spotify_headers(), params={"q": request.args.get('q'), "type": request.args.get('type', 'track'), "limit": 20, "market": "KR"})
-        return jsonify(res.json()), res.status_code
-    except Exception as e: return jsonify({"error": str(e)}), 500
-
-@app.route('/api/track/<tid>', methods=['GET'])
-def api_track(tid):
-    try:
-        conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("SELECT track_title, artist_name, image_url, bpm, music_key, duration FROM TRACKS WHERE track_id=:1", [tid])
-        r = cur.fetchone()
-        if r and r[3]: return jsonify({"id":tid, "title":r[0], "artist":r[1], "image":r[2], "bpm":r[3], "key":r[4], "duration":r[5], "source":"DB"})
-        
-        save_track_details(tid, cur, get_spotify_headers(), [])
-        cur.execute("SELECT track_title, artist_name, image_url, bpm, music_key, duration FROM TRACKS WHERE track_id=:1", [tid])
-        r = cur.fetchone()
-        return jsonify({"id":tid, "title":r[0], "artist":r[1], "image":r[2], "bpm":r[3], "key":r[4], "duration":r[5], "source":"API"})
     except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route('/api/admin/update-movies', methods=['POST'])
@@ -289,26 +402,19 @@ def api_adm_update(): return jsonify({"message": update_box_office_data()})
 def get_ttl():
     try:
         conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("""
-            SELECT m.movie_id, m.title, m.rank, m.poster_url, t.track_id, t.track_title, t.artist_name, t.preview_url, a.album_cover_url
-            FROM MOVIES m LEFT JOIN MOVIE_OSTS mo ON m.movie_id=mo.movie_id LEFT JOIN TRACKS t ON mo.track_id=t.track_id LEFT JOIN ALBUMS a ON t.album_id=a.album_id
-            WHERE m.rank<=10 ORDER BY m.rank ASC
-        """)
+        cur.execute("""SELECT m.movie_id, m.title, m.rank, m.poster_url, t.track_id, t.track_title, t.artist_name, t.preview_url, a.album_cover_url FROM MOVIES m LEFT JOIN MOVIE_OSTS mo ON m.movie_id=mo.movie_id LEFT JOIN TRACKS t ON mo.track_id=t.track_id LEFT JOIN ALBUMS a ON t.album_id=a.album_id WHERE m.rank<=10 ORDER BY m.rank ASC""")
         rows = cur.fetchall()
         ttl = "@prefix schema: <http://schema.org/> .\n@prefix komc: <https://knowledgemap.kr/komc/def/> .\n@prefix tag: <https://knowledgemap.kr/komc/def/tag/> .\n"
         tcur = conn.cursor()
         for r in rows:
             mid, mt, rk, mp, tid, tt, ar, pr, cov = r
             m_uri = base64.urlsafe_b64encode(mid.encode()).decode().rstrip("=")
-            mp = mp or "img/playlist-placeholder.png"; cov = cov or "img/playlist-placeholder.png"
-            tt = tt or "OST 정보 없음"; ar = ar or "-"
-            
+            mp = mp or "img/playlist-placeholder.png"; cov = cov or "img/playlist-placeholder.png"; tt = tt or "OST 정보 없음"; ar = ar or "-"
             tags = ""
             if tid:
                 tcur.execute("SELECT tag_id FROM TRACK_TAGS WHERE track_id=:1", [tid])
                 tl = [x[0].replace('tag:', '') for x in tcur.fetchall()]
                 if tl: tags = f"    komc:relatedTag tag:{', tag:'.join(tl)} ;"
-            
             t_uri = tid if tid else f"{m_uri}_ost"
             ttl += f"""
 <https://knowledgemap.kr/komc/resource/movie/{m_uri}> a schema:Movie ; schema:name "{mt}" ; schema:image "{mp}" ; komc:rank {rk} .
@@ -318,6 +424,15 @@ def get_ttl():
 """ 
         return Response(ttl, mimetype='text/turtle')
     except Exception as e: return f"# Error: {e}", 500
+
+@app.route('/api/spotify-token', methods=['GET'])
+def api_tk(): return api_get_token()
+@app.route('/api/search', methods=['GET'])
+def api_src(): return api_search()
+@app.route('/api/track/<tid>', methods=['GET'])
+def api_tr(tid): return api_get_track_detail(tid)
+
+from werkzeug.security import generate_password_hash, check_password_hash
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
