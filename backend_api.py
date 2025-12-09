@@ -8,17 +8,15 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, g, Response
 from flask_cors import CORS
 
-# --- 1. 설정 (환경 변수 필수) ---
+# --- 1. 설정 ---
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 KOBIS_API_KEY = os.getenv("KOBIS_API_KEY")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 
-# [핵심 수정] 공식 Spotify API 주소로 변경 (프록시 X)
 SPOTIFY_auth_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_API_BASE = "https://api.spotify.com/v1"
 
-# KOBIS URL
 KOBIS_BOXOFFICE_URL = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json"
 KOBIS_MOVIE_INFO_URL = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/movie/searchMovieInfo.json"
 KOBIS_MOVIE_LIST_URL = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/movie/searchMovieList.json"
@@ -75,9 +73,7 @@ def get_spotify_headers():
     }
     data = {'grant_type': 'client_credentials'}
     res = requests.post(SPOTIFY_auth_URL, headers=headers, data=data)
-    if res.status_code != 200: 
-        print(f"🚨 Spotify Auth Error: {res.text}")
-        raise Exception(f"Spotify Auth Failed: {res.status_code}")
+    if res.status_code != 200: raise Exception(f"Spotify Auth Failed: {res.status_code}")
     return {'Authorization': f'Bearer {res.json().get("access_token")}'}
 
 def ms_to_iso_duration(ms):
@@ -86,19 +82,12 @@ def ms_to_iso_duration(ms):
     minutes = int((ms / (1000 * 60)) % 60)
     return f"PT{minutes}M{seconds}S"
 
-# [핵심 수정] Spotify ID 추출 로직 개선
 def extract_spotify_id(url):
-    # 1. 이미 ID만 입력한 경우 (22자 내외)
+    """Spotify 링크에서 ID 추출"""
     if len(url) == 22 and re.match(r'^[a-zA-Z0-9]+$', url):
         return url
-    
-    # 2. URL에서 ID 추출 (track/ 뒤에 오는 ID)
-    # 예: https://open.spotify.com/track/12345?si=...
     match = re.search(r'track/([a-zA-Z0-9]{22})', url)
-    if match:
-        return match.group(1)
-        
-    return None # 유효하지 않음
+    return match.group(1) if match else None
 
 # --- 3. KOBIS 정보 조회 ---
 def get_kobis_metadata(movie_name):
@@ -146,15 +135,10 @@ def find_best_track(titles, headers):
 def save_track_details(track_id, cursor, headers, genres=[]):
     if not track_id: return None
     try:
-        # [수정] ID가 올바른지 확인 후 요청
         track_res = requests.get(f"{SPOTIFY_API_BASE}/tracks/{track_id}", headers=headers)
-        if track_res.status_code != 200:
-            print(f"    ⚠️ 트랙 조회 실패 ({track_id}): {track_res.status_code}")
-            return None
-            
+        if track_res.status_code != 200: return None
         t_data = track_res.json()
         
-        # 오디오 특징 (없을 수도 있음)
         audio_res = requests.get(f"{SPOTIFY_API_BASE}/audio-features/{track_id}", headers=headers)
         a_data = audio_res.json() if audio_res.status_code == 200 else {}
 
@@ -170,7 +154,10 @@ def save_track_details(track_id, cursor, headers, genres=[]):
         duration_iso = ms_to_iso_duration(t_data.get('duration_ms', 0))
 
         if album_id:
-            cursor.execute("MERGE INTO ALBUMS USING dual ON (album_id = :aid) WHEN NOT MATCHED THEN INSERT (album_id, album_cover_url) VALUES (:aid, :cover)", {'aid': album_id, 'cover': image_url})
+            cursor.execute("""
+                MERGE INTO ALBUMS USING dual ON (album_id = :aid) 
+                WHEN NOT MATCHED THEN INSERT (album_id, album_cover_url) VALUES (:aid, :cover)
+            """, {'aid': album_id, 'cover': image_url})
 
         cursor.execute("""
             MERGE INTO TRACKS t USING dual ON (t.track_id = :tid)
@@ -190,19 +177,20 @@ def save_track_details(track_id, cursor, headers, genres=[]):
         if valence > 0.7: tags.add('tag:Pop')
 
         genre_map = {"액션":"tag:Action", "SF":"tag:SF", "코미디":"tag:Exciting", "드라마":"tag:Sentimental", "멜로":"tag:Romance", "로맨스":"tag:Romance", "공포":"tag:Tension", "호러":"tag:Tension", "스릴러":"tag:Tension", "범죄":"tag:Tension", "애니메이션":"tag:Animation", "가족":"tag:Rest", "뮤지컬":"tag:Pop"}
-        
         for g in genres:
             for k, v in genre_map.items():
                 if k in g: tags.add(v)
 
         for tag in tags:
             try:
-                cursor.execute("MERGE INTO TRACK_TAGS USING dual ON (track_id = :tid AND tag_id = :tag) WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (:tid, :tag)", {'tid': track_id, 'tag': tag})
+                cursor.execute("""
+                    MERGE INTO TRACK_TAGS USING dual ON (track_id = :tid AND tag_id = :tag) 
+                    WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (:tid, :tag)
+                """, {'tid': track_id, 'tag': tag})
             except: pass
             
         cursor.connection.commit()
         return t_data
-
     except Exception as e:
         print(f"⚠️ 트랙 저장 중 오류: {e}")
         return None
@@ -227,7 +215,6 @@ def update_box_office_data():
             print(f"\n[Rank {rank}] {title} 처리 중...")
 
             genres, title_en = get_kobis_metadata(title)
-
             poster_url = None
             try:
                 tmdb_res = requests.get("https://api.themoviedb.org/3/search/movie", params={"api_key": TMDB_API_KEY, "query": title, "language": "ko-KR"}).json()
@@ -295,60 +282,52 @@ def api_get_track_detail(track_id):
             return jsonify({"id": track_id, "title": row[0], "artist": row[1], "image": row[2], "bpm": row[3], "key": row[4], "duration": row[5], "source": "DB"})
         
         headers = get_spotify_headers()
-        # ID가 유효한지 확인하고 저장
-        result = save_track_details(track_id, cursor, headers, genres=[])
-        if not result:
-            return jsonify({"error": "Track not found"}), 404
+        res = save_track_details(track_id, cursor, headers, genres=[])
+        if not res: return jsonify({"error": "Track not found"}), 404
         
         cursor.execute("SELECT track_title, artist_name, image_url, bpm, music_key, duration FROM TRACKS WHERE track_id = :tid", {'tid': track_id})
         new_row = cursor.fetchone()
         return jsonify({"id": track_id, "title": new_row[0], "artist": new_row[1], "image": new_row[2], "bpm": new_row[3], "key": new_row[4], "duration": new_row[5], "source": "Spotify->DB"})
     except Exception as e: return jsonify({"error": str(e)}), 500
 
-# [NEW] 수정용 API (링크 받아서 처리)
+# [복구된 기능] 영화 OST 수정 API + 로그 저장
 @app.route('/api/movie/<movie_id>/update-ost', methods=['POST'])
 def api_update_movie_ost(movie_id):
     data = request.json
     spotify_url = data.get('spotifyUrl')
     user_ip = request.remote_addr 
     
-    if not spotify_url:
-        return jsonify({"error": "Spotify 링크가 필요합니다."}), 400
+    if not spotify_url: return jsonify({"error": "Link required"}), 400
 
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         headers = get_spotify_headers()
 
-        # 1. ID 추출 (개선된 로직 사용)
         track_id = extract_spotify_id(spotify_url)
-        if not track_id:
-            return jsonify({"error": "잘못된 Spotify 링크입니다."}), 400
+        if not track_id: return jsonify({"error": "Invalid Link"}), 400
 
-        # 2. Spotify 조회 및 저장
-        # (save_track_details는 ID만 받습니다. 객체가 아닙니다.)
+        # 새 트랙 정보 저장
         result = save_track_details(track_id, cursor, headers, genres=[])
-        
-        if not result:
-            return jsonify({"error": "Spotify에서 해당 곡을 찾을 수 없습니다."}), 404
+        if not result: return jsonify({"error": "Track not found"}), 404
 
-        # 3. 로그 남기기 및 교체
+        # 기존 정보 조회 (로그용)
         cursor.execute("SELECT track_id FROM MOVIE_OSTS WHERE movie_id = :mid", {'mid': movie_id})
         prev_row = cursor.fetchone()
-        prev_track_id = prev_row[0] if prev_row else "NONE"
+        prev_id = prev_row[0] if prev_row else "NONE"
 
+        # 교체
         cursor.execute("DELETE FROM MOVIE_OSTS WHERE movie_id = :mid", {'mid': movie_id})
         cursor.execute("INSERT INTO MOVIE_OSTS (movie_id, track_id) VALUES (:mid, :tid)", {'mid': movie_id, 'tid': track_id})
 
+        # 로그 저장
         cursor.execute("""
-            INSERT INTO MODIFICATION_LOGS 
-            (target_type, target_id, action_type, previous_value, new_value, user_ip)
+            INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, previous_value, new_value, user_ip)
             VALUES (:type, :tgt, 'UPDATE', :prev, :new, :ip)
-        """, {'type': 'MOVIE_OST', 'tgt': movie_id, 'prev': prev_track_id, 'new': track_id, 'ip': user_ip})
+        """, {'type': 'MOVIE_OST', 'tgt': movie_id, 'prev': prev_id, 'new': track_id, 'ip': user_ip})
 
         conn.commit()
-        return jsonify({"message": "수정 완료", "new_track": result['name']})
-
+        return jsonify({"message": "Updated", "new_track": result['name']})
     except Exception as e:
         print(f"[수정 오류] {e}")
         return jsonify({"error": str(e)}), 500
