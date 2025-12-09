@@ -246,6 +246,69 @@ def update_box_office_data():
         print(f"[Batch 오류] {e}")
         return f"업데이트 실패: {e}"
 
+def extract_spotify_id(url):
+    # 예: https://open.spotify.com/track/12345?si=... -> 12345
+    match = re.search(r'track/([a-zA-Z0-9]+)', url)
+    return match.group(1) if match else url # 매칭 안 되면 그대로 반환 (ID일 수 있으므로)
+
+# [NEW] 영화 OST 수정 API (로그 저장 포함)
+@app.route('/api/movie/<movie_id>/update-ost', methods=['POST'])
+def api_update_movie_ost(movie_id):
+    """사용자가 입력한 Spotify 링크로 영화의 OST를 교체하고 로그를 남김"""
+    data = request.json
+    spotify_url = data.get('spotifyUrl')
+    user_ip = request.remote_addr # 사용자 IP 자동 수집 (로그인 대용)
+    
+    if not spotify_url:
+        return jsonify({"error": "Spotify 링크가 필요합니다."}), 400
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        headers = get_spotify_headers()
+
+        # 1. 링크에서 트랙 ID 추출
+        track_id = extract_spotify_id(spotify_url)
+        
+        # 2. Spotify에서 새 트랙 정보 가져와서 DB에 저장 (상세정보 + 태그)
+        # (기존에 만든 함수 재활용!)
+        track_info = save_track_details(track_id, cursor, headers, genres=[])
+        if not track_info:
+            return jsonify({"error": "유효하지 않은 Spotify 트랙입니다."}), 400
+
+        # 3. 기존 OST 정보 조회 (로그 남기기용)
+        cursor.execute("SELECT track_id FROM MOVIE_OSTS WHERE movie_id = :mid", {'mid': movie_id})
+        prev_row = cursor.fetchone()
+        prev_track_id = prev_row[0] if prev_row else "NONE"
+
+        # 4. 영화-OST 연결 업데이트 (덮어쓰기)
+        cursor.execute("DELETE FROM MOVIE_OSTS WHERE movie_id = :mid", {'mid': movie_id})
+        cursor.execute("INSERT INTO MOVIE_OSTS (movie_id, track_id) VALUES (:mid, :tid)", {'mid': movie_id, 'tid': track_id})
+
+        # 5. [핵심] 수정 로그 저장
+        cursor.execute("""
+            INSERT INTO MODIFICATION_LOGS 
+            (target_type, target_id, action_type, previous_value, new_value, user_ip)
+            VALUES (:type, :tgt, 'UPDATE', :prev, :new, :ip)
+        """, {
+            'type': 'MOVIE_OST',
+            'tgt': movie_id,
+            'prev': prev_track_id,
+            'new': track_id,
+            'ip': user_ip
+        })
+
+        conn.commit()
+        
+        return jsonify({
+            "message": "OST가 성공적으로 수정되었습니다.",
+            "new_track": track_info['name']
+        })
+
+    except Exception as e:
+        print(f"[수정 오류] {e}")
+        return jsonify({"error": str(e)}), 500
+    
 # --- 7. API 라우트 ---
 @app.route('/api/spotify-token', methods=['GET'])
 def api_get_token():
