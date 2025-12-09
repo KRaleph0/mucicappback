@@ -9,6 +9,7 @@ from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, g, Response
 from flask_cors import CORS
+from skos_manager import SkosManager
 
 # --- 1. 설정 ---
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
@@ -16,7 +17,7 @@ SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 KOBIS_API_KEY = os.getenv("KOBIS_API_KEY")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 DATA_GO_KR_API_KEY = os.getenv("DATA_GO_KR_API_KEY") # [NEW] 공공데이터 키
-
+skos_manager = SkosManager("skos-definition.ttl")
 SPOTIFY_auth_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_API_BASE = "https://api.spotify.com/v1"
 
@@ -259,7 +260,41 @@ def update_box_office_data():
                 except: pass
         return "업데이트 완료"
     except Exception as e: return f"Error: {e}"
+    
+def save_track_details(track_id, cursor, headers, genres=[]):
+    # ... (트랙/앨범 저장 로직은 그대로 유지) ...
 
+    # --- 태그 저장 로직 (업그레이드) ---
+    tags = set(["tag:Spotify"])
+    if genres: tags.add("tag:MovieOST")
+    
+    # 1. 오디오 특징 기반 태그 (기존 유지)
+    # ... (energy, valence 로직) ...
+
+    # 2. 영화 장르 매핑 (기존 유지)
+    genre_map = { ... } # (기존 맵)
+    for g in genres:
+        for k, v in genre_map.items():
+            if k in g: tags.add(v)
+            
+    # 3. [NEW] SKOS 계층 구조를 이용한 태그 확장! ⭐
+    # 현재 수집된 태그들의 '상위 태그'를 모두 찾아와서 추가합니다.
+    final_tags = set()
+    for t in tags:
+        # 예: t가 "tag:KPop"이면 -> ["tag:KPop", "tag:Pop", "tag:Genre"] 반환
+        expanded = skos_manager.get_broader_tags(t)
+        final_tags.update(expanded)
+
+    # 4. DB 저장 (확장된 태그 리스트로 저장)
+    for tag_id in final_tags:
+        try:
+            cursor.execute("""
+                MERGE INTO TRACK_TAGS USING dual ...
+            """, {'tid': track_id, 'tag': tag_id})
+        except: pass
+    
+    cursor.connection.commit()
+    return t_data
 # --- 7. API 라우트 ---
 
 # [NEW] 상황 기반 추천 API (날씨, 특일)
