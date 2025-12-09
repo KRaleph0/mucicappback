@@ -97,25 +97,26 @@ def get_kobis_metadata(movie_name):
         if movie_list:
             target = movie_list[0]
             title_en = target.get('movieNmEn', '')
+            title_og = target.get('movieNmOg', '') 
             genre_str = target.get('genreAlt', '')
             genres = genre_str.split(',') if genre_str else []
-            print(f"    🔍 KOBIS 정보: {movie_name} (En: {title_en}) / 장르: {genres}")
-            return genres, title_en
-        return [], ""
+            print(f"    🔍 KOBIS 정보: {movie_name} (En: {title_en}, Og: {title_og}) / 장르: {genres}")
+            return genres, title_en, title_og
+        return [], "", ""
     except Exception as e:
         print(f"    ⚠️ KOBIS 오류: {e}")
-        return [], ""
+        return [], "", ""
 
 # --- 4. Spotify 검색 ---
 def find_best_track(titles, headers):
-    candidates = []
+    search_candidates = []
     seen = set()
     for t in titles:
         if t and t not in seen:
-            candidates.append(t)
+            search_candidates.append(t)
             seen.add(t)
 
-    for title in candidates:
+    for title in search_candidates:
         query = f"{title} ost"
         print(f"    🎵 검색 시도: '{query}'")
         try:
@@ -206,7 +207,7 @@ def update_box_office_data():
             title = movie['movieNm']
             print(f"\n[Rank {rank}] {title} 처리 중...")
 
-            genres, title_en = get_kobis_metadata(title)
+            genres, title_en, title_og = get_kobis_metadata(title)
 
             poster_url = None
             try:
@@ -225,7 +226,7 @@ def update_box_office_data():
                 conn.commit()
             except: pass
 
-            matched_track = find_best_track([title_en, title], headers)
+            matched_track = find_best_track([title_og, title_en, title], headers)
             if matched_track:
                 track_id = matched_track['id']
                 save_track_details(track_id, cursor, headers, genres)
@@ -332,7 +333,6 @@ def api_update_movies():
     msg = update_box_office_data()
     return jsonify({"message": msg})
 
-# [수정] TTL 생성 API - 실제 트랙 ID 사용 (Correct URI)
 @app.route('/api/data/box-office.ttl', methods=['GET'])
 def get_box_office_ttl():
     try:
@@ -369,7 +369,7 @@ def get_box_office_ttl():
                     if tags: tags_str = f"    komc:relatedTag tag:{', tag:'.join(tags)} ;"
                 except: pass
             
-            # [핵심] 트랙 URI 결정: 진짜 트랙 ID가 있으면 그것을, 없으면 영화기반 임시 ID 사용
+            # [핵심] 실제 트랙 ID 사용 (없으면 임시 ID)
             track_uri_suffix = tid if tid else f"{m_uri}_ost"
 
             ttl += f"""
