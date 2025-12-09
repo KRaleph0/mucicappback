@@ -293,26 +293,77 @@ def api_recommend_context():
 # (나머지 API들 그대로 유지)
 @app.route('/api/auth/signup', methods=['POST'])
 def api_signup():
-    d = request.json; uid, pw, nick = d.get('id'), d.get('password'), d.get('nickname', 'User')
-    try:
-        conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("SELECT user_id FROM USERS WHERE user_id=:1", [uid])
-        if cur.fetchone(): return jsonify({"error": "ID exists"}), 409
-        cur.execute("INSERT INTO USERS (user_id, password, nickname, role) VALUES (:1, :2, :3, 'user')", [uid, generate_password_hash(pw), nick])
-        conn.commit(); return jsonify({"message": "Success"})
-    except Exception as e: return jsonify({"error": str(e)}), 500
+    d = request.json
+    # 1. 입력값 정제 (양쪽 공백 제거)
+    uid = d.get('id', '').strip().lower()  # 아이디는 무조건 소문자로 통일
+    pw = d.get('password', '').strip()     # 비밀번호 공백 제거
+    nick = d.get('nickname', 'User').strip()
 
+    if not uid or not pw:
+        return jsonify({"error": "아이디와 비밀번호를 입력해주세요."}), 400
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # 2. 중복 확인 (소문자로 변환된 ID로 확인하므로 중복 방지됨)
+        cursor.execute("SELECT user_id FROM USERS WHERE user_id=:1", [uid])
+        if cursor.fetchone():
+            return jsonify({"error": "이미 존재하는 ID입니다."}), 409
+
+        # 3. 저장
+        cursor.execute("""
+            INSERT INTO USERS (user_id, password, nickname, role) 
+            VALUES (:1, :2, :3, 'user')
+        """, [uid, generate_password_hash(pw), nick])
+        
+        conn.commit()
+        return jsonify({"message": "회원가입 성공!"})
+
+    except Exception as e:
+        print(f"[회원가입 오류] {e}")
+        return jsonify({"error": "서버 오류가 발생했습니다."}), 500
+
+
+# ---------------------------------------------------------
+# [수정] 로그인 API (공백 제거 + 소문자 변환)
+# ---------------------------------------------------------
 @app.route('/api/auth/login', methods=['POST'])
 def api_login():
-    d = request.json; uid, pw = d.get('id'), d.get('password')
-    try:
-        conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("SELECT user_id, password, nickname, profile_img, role FROM USERS WHERE user_id=:1", [uid])
-        u = cur.fetchone()
-        if u and check_password_hash(u[1], pw): return jsonify({"message": "Login success", "user": {"id": u[0], "nickname": u[2], "profile_img": u[3], "role": u[4]}})
-        return jsonify({"error": "Invalid"}), 401
-    except Exception as e: return jsonify({"error": str(e)}), 500
+    d = request.json
+    # 로그인할 때도 똑같이 정제해야 DB에 있는 값과 매칭됨
+    uid = d.get('id', '').strip().lower()
+    pw = d.get('password', '').strip()
 
+    if not uid or not pw:
+         return jsonify({"error": "아이디와 비밀번호를 입력해주세요."}), 400
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # 사용자 조회
+        cursor.execute("SELECT user_id, password, nickname, profile_img, role FROM USERS WHERE user_id=:1", [uid])
+        user = cursor.fetchone() # (id, pw_hash, nickname, img, role)
+
+        # 비밀번호 검증
+        if user and check_password_hash(user[1], pw):
+            return jsonify({
+                "message": "로그인 성공",
+                "user": {
+                    "id": user[0],
+                    "nickname": user[2],
+                    "profile_img": user[3],
+                    "role": user[4]
+                }
+            })
+        else:
+            # 아이디가 없거나 비번이 틀린 경우
+            return jsonify({"error": "아이디 또는 비밀번호가 잘못되었습니다."}), 401
+
+    except Exception as e:
+        print(f"[로그인 오류] {e}")
+        return jsonify({"error": "서버 오류가 발생했습니다."}), 500
 @app.route('/api/admin/logs', methods=['POST'])
 def api_logs():
     d = request.json; uid = d.get('user_id')
