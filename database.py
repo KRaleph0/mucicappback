@@ -27,14 +27,17 @@ def get_db_connection():
     return g.db
 
 def close_db(exception=None):
-    db = g.pop('db', None)
+    db = g.pop("db", None)
     if db is not None:
         try:
             db.close()
         except oracledb.exceptions.InterfaceError as e:
-            # 이미 끊어진 연결(DPY-1001)은 그냥 무시
-            # 다른 에러 코드면 필요시 로깅 정도만
-            print(f"[DB Close Warning] {e}")
+            # DPY-1001: 이미 끊긴 연결 → 조용히 무시
+            if "DPY-1001" in str(e):
+                print(f"[DB Close Warning] {e}")
+            else:
+                print(f"[DB Close Error] {e}")
         except Exception as e:
-            # teardown에서 여기서 또 예외 터지면 응답이 500으로 날아가니 그냥 로그만 남기고 무시
+            # teardown에서 예외 다시 던지면 응답이 500으로 덮이니까
+            # 여기서는 그냥 로그만 남기고 끝낸다
             print(f"[DB Close Error] {e}")
