@@ -28,6 +28,19 @@ def ms_to_iso_duration(ms):
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in config.ALLOWED_EXTENSIONS
 
+# [NEW] 이 함수가 없어서 에러가 났었습니다!
+def extract_spotify_id(url):
+    if not url: return None
+    # 22자리 ID가 직접 들어온 경우
+    if len(url) == 22 and re.match(r'^[a-zA-Z0-9]+$', url): return url
+    # URL (https://open.spotify.com/track/ID)
+    match = re.search(r'track/([a-zA-Z0-9]{22})', url)
+    if match: return match.group(1)
+    # URI (spotify:track:ID)
+    match = re.search(r'track:([a-zA-Z0-9]{22})', url)
+    if match: return match.group(1)
+    return None
+
 # --- 2. 보안 (Turnstile) ---
 def verify_turnstile(token):
     if not token: return False, "캡차 토큰이 없습니다."
