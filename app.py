@@ -53,20 +53,28 @@ WEATHER_MAPPING = {
 # =========================================================
 
 @app.route('/api/admin/update-movies', methods=['POST'])
-def api_update_movies():
+def admin_update_movies():
+    """
+    KOBIS + KMDB API를 사용해 이번 달 박스오피스 데이터를 DB에 갱신.
+    """
     try:
-        msg = update_box_office_data()
-        return jsonify({"message": msg})
+        update_box_office_data()
+        return jsonify({"message": "Box Office data updated successfully"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# =========================================================
+# 3-2. 박스오피스 TTL 제공 (홈 박스오피스용)
+# =========================================================
 @app.route('/api/data/box-office.ttl', methods=['GET'])
 def get_box_office_ttl():
+    """
+    DB의 MOVIES, MOVIE_OSTS, TRACKS를 합쳐서 Turtle 포맷으로 반환.
+    홈 화면에서 박스오피스 영역이 이 TTL을 바로 읽어 사용.
+    """
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
-        # [수정] JOIN -> LEFT JOIN 변경 (OST 없어도 영화는 나오게)
         cursor.execute("""
             SELECT m.movie_id, m.title, m.rank, m.poster_url, 
                    t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
@@ -76,26 +84,27 @@ def get_box_office_ttl():
             ORDER BY m.rank ASC
         """)
         rows = cursor.fetchall()
-        
+        cursor.close()
+        conn.close()
+
         ttl_parts = [
             "@prefix schema: <http://schema.org/> .",
             "@prefix komc: <https://knowledgemap.kr/komc/def/> .",
             "@prefix tag: <https://knowledgemap.kr/komc/def/tag/> .",
             "",
-            "# Real-time Box Office Data from DB"
+            "# Box Office Movies & OST",
+            "",
         ]
-        
-        for row in rows:
-            mid, mtitle, rank, mposter, tid, ttitle, artist, tcover, audio = row
-            
-            # 1. 영화 정보 (항상 생성)
+
+        for r in rows:
+            mid, title, rank, poster, tid, ttitle, artist, tcover, audio = r
+            movie_uri = f"<https://knowledgemap.kr/resource/movie/{mid}>"
             ttl_parts.append(f"""
-<https://knowledgemap.kr/resource/movie/{mid}> a schema:Movie ;
-    schema:name "{mtitle}" ;
-    schema:image "{mposter or ''}" ;
-    komc:rank {rank} .""")
-            
-            # 2. 트랙 정보 (있는 경우에만 생성)
+{movie_uri} a schema:Movie ;
+    schema:name "{title}" ;
+    schema:position "{rank}" ;
+    schema:image "{poster or ''}" .""")
+
             if tid:
                 ttl_parts.append(f"""
 <https://knowledgemap.kr/resource/track/{tid}> a schema:MusicRecording ;
@@ -103,54 +112,25 @@ def get_box_office_ttl():
     schema:byArtist "{artist}" ;
     schema:image "{tcover}" ;
     schema:audio "{audio or ''}" ;
-    komc:featuredIn <https://knowledgemap.kr/resource/movie/{mid}> ;
+    komc:featuredIn {movie_uri} ;
     komc:relatedTag tag:MovieOST .""")
-        
-        if not rows:
-            ttl_parts.append("# No data found. Please run: curl -X POST http://localhost:5000/api/admin/update-movies")
 
-        return make_response("\n".join(ttl_parts), 200, {'Content-Type': 'text/turtle; charset=utf-8'})
+        if not rows:
+            ttl_parts.append("# No data found. Please run: /api/admin/update-movies")
+
+        return make_response(
+            "\n".join(ttl_parts),
+            200,
+            {'Content-Type': 'text/turtle; charset=utf-8'}
+        )
 
     except Exception as e:
         print(f"[TTL Gen Error] {e}")
         return str(e), 500
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT m.movie_id, m.title, m.rank, m.poster_url, 
-                   t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
-            FROM MOVIES m
-            JOIN MOVIE_OSTS mo ON m.movie_id = mo.movie_id
-            JOIN TRACKS t ON mo.track_id = t.track_id
-            ORDER BY m.rank ASC
-        """)
-        rows = cursor.fetchall()
-        
-        ttl_parts = [
-            "@prefix schema: <http://schema.org/> .",
-            "@prefix komc: <https://knowledgemap.kr/komc/def/> .",
-            "@prefix tag: <https://knowledgemap.kr/komc/def/tag/> .",
-            ""
-        ]
-        
-        for row in rows:
-            mid, mtitle, rank, mposter, tid, ttitle, artist, tcover, audio = row
-            ttl_parts.append(f"""<https://knowledgemap.kr/resource/movie/{mid}> a schema:Movie ;
-    schema:name "{mtitle}" ;
-    schema:image "{mposter}" ;
-    komc:rank {rank} .""")
-            ttl_parts.append(f"""<https://knowledgemap.kr/resource/track/{tid}> a schema:MusicRecording ;
-    schema:name "{ttitle}" ;
-    schema:byArtist "{artist}" ;
-    schema:image "{tcover}" ;
-    schema:audio "{audio}" ;
-    komc:featuredIn <https://knowledgemap.kr/resource/movie/{mid}> ;
-    komc:relatedTag tag:MovieOST .""")
-        
-        return make_response("\n".join(ttl_parts), 200, {'Content-Type': 'text/turtle; charset=utf-8'})
-    except Exception as e: return str(e), 500
 
+# =========================================================
+# 3-3. 상황별 추천 (context.ttl 역할)
+# =========================================================
 @app.route('/api/recommend/context', methods=['GET'])
 def get_context_recommendation():
     """
@@ -162,17 +142,16 @@ def get_context_recommendation():
     """
     try:
         # 1. 실시간 정보 수집
-        weather_code = get_current_weather()  # Rain, Snow, Clear
+        weather_code = get_current_weather()  # Rain, Snow, Clear, etc.
         holiday_name = get_today_holiday()    # 휴일명 or None
         hour = datetime.now().hour
 
-        # 2. 추천 로직 (SKOS)
+        # 2. 추천 로직
+        detected_triples = []
         target_tag = "tag:Pop"
-        context_uri = "https://knowledgemap.kr/komc/context/Day"
-        pref_label = "일상"
-        definition = "오늘 하루를 위한 음악"
-        
-        detected_triples = [] 
+        context_uri = ""
+        pref_label = ""
+        definition = ""
 
         # (1) 휴일 우선 적용
         if holiday_name:
@@ -181,20 +160,20 @@ def get_context_recommendation():
             context_uri = f"http://knowledgemap.kr/komc/holiday/{holiday_name}"
             pref_label = f"특별한 날 ({holiday_name})"
             definition = f"오늘은 {holiday_name}! 즐거운 하루 보내세요 🎉"
-            
+
             detected_triples.append(f"<{context_uri}> a komc:HolidayContext ;")
             detected_triples.append(f"    schema:name \"{holiday_name}\" ;")
             detected_triples.append(f"    komc:datetype \"{info['date_type']}\" ;")
-            detected_triples.append(f"    skos:link <https://knowledgemap.kr/komc/def/{target_tag.split(':')[1]}> .")
+            detected_triples.append(f"    komc:relatedTag {target_tag} .")
 
         # (2) 날씨 적용
-        elif weather_code in ['Rain', 'Snow']:
+        elif weather_code in ["Rain", "Snow"]:
             info = WEATHER_MAPPING[weather_code]
             target_tag = info["tag"]
             context_uri = f"https://knowledgemap.kr/komc/weather/{weather_code}"
             pref_label = f"{info['label']} 오는 날"
             definition = f"창밖의 {info['label']}와 어울리는 감성 ☔"
-            
+
             detected_triples.append(f"<{context_uri}> a schema:WeatherForecast ;")
             detected_triples.append(f"    schema:weatherCondition \"{info['label']}\" ;")
             detected_triples.append(f"    komc:pty \"{info['code']}\" ;")
@@ -203,37 +182,46 @@ def get_context_recommendation():
         # (3) 시간대 적용
         else:
             time_slot = "Night" if (22 <= hour or hour < 6) else "Day"
-            if 6 <= hour < 12: time_slot = "Morning"
-            elif 18 <= hour < 22: time_slot = "Evening"
-            
+            if 6 <= hour < 12:
+                time_slot = "Morning"
+            elif 18 <= hour < 22:
+                time_slot = "Evening"
+
             context_uri = f"https://knowledgemap.kr/komc/time/{time_slot}"
-            tag_map = {"Morning": "tag:Clear", "Day": "tag:Exciting", "Evening": "tag:Sentimental", "Night": "tag:Rest"}
+            tag_map = {
+                "Morning": "tag:Clear",
+                "Day": "tag:Exciting",
+                "Evening": "tag:Sentimental",
+                "Night": "tag:Rest",
+            }
             target_tag = tag_map.get(time_slot, "tag:Pop")
-            
-            pref_label = f"{time_slot}"
+
+            pref_label = time_slot
             definition = {
                 "Morning": "상쾌한 아침을 여는 시작! ☀️",
                 "Day": "활기찬 오후 에너지 충전 ⚡",
                 "Evening": "하루를 마무리하는 감성 🌇",
-                "Night": "깊은 밤, 편안한 휴식 🌙"
+                "Night": "깊은 밤, 편안한 휴식 🌙",
             }.get(time_slot, "음악과 함께하는 시간")
-            
-            detected_triples.append(f"<{context_uri}> a komc:TimeContext ;")
-            detected_triples.append(f"    skos:prefLabel \"{time_slot}\" .")
 
-        # 3. DB에서 추천 곡 랜덤 5개 추출
+            detected_triples.append(f"<{context_uri}> a komc:TimeContext ;")
+            detected_triples.append(f"    skos:prefLabel \"{time_slot}\"@ko ;")
+            detected_triples.append(f"    komc:relatedTag {target_tag} .")
+
+        # 3. 태그 기반 추천곡 DB 조회
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT * FROM (
-                SELECT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
-                FROM TRACKS t
-                JOIN TRACK_TAGS tt ON t.track_id = tt.track_id
-                WHERE tt.tag_id = :1
-                ORDER BY dbms_random.value
-            ) WHERE ROWNUM <= 5
-        """, [target_tag])
+            SELECT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
+            FROM TRACKS t
+            JOIN TRACK_TAGS tt ON t.track_id = tt.track_id
+            WHERE tt.tag_uri = :tag_uri
+            ORDER BY t.popularity DESC
+            FETCH FIRST 10 ROWS ONLY
+        """, {"tag_uri": target_tag})
         rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
 
         # 4. TTL 조립
         ttl_parts = [
@@ -244,38 +232,51 @@ def get_context_recommendation():
             "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .",
             "",
             "# Generated dynamically based on Open API Data",
-            ""
+            "",
         ]
-        
+
+        # 상황 컨텍스트에서 나온 트리플들
         ttl_parts.extend(detected_triples)
-        
+
+        # 현재 컨텍스트 노드
         ttl_parts.append(f"""
 komc:CurrentContext a skos:Concept ;
     skos:prefLabel "{pref_label}"@ko ;
     skos:definition "{definition}"@ko ;
-    komc:derivedFrom <{context_uri}> .""")
+    komc:derivedFrom <{context_uri}> .
+""")
 
+        # ★ 추가: 현재 컨텍스트와 연결된 태그 (프론트가 태그 UI 만들 때 사용)
+        ttl_parts.append(f"komc:CurrentContext komc:relatedTag {target_tag} .")
+
+        # 추천 곡들
         track_uris = []
         for r in rows:
             tid, title, artist, cover, preview = r
             track_uri = f"<https://knowledgemap.kr/resource/track/{tid}>"
             track_uris.append(track_uri)
-            ttl_parts.append(f"""
+            ttl_parts.append(f"""as
 {track_uri} a schema:MusicRecording ;
     schema:name "{title}" ;
     schema:byArtist "{artist}" ;
     schema:image "{cover}" ;
     schema:audio "{preview}" .""")
-        
-        if track_uris:
-            ttl_parts.append(f"komc:CurrentContext komc:recommends {', '.join(track_uris)} .")
 
-        return make_response("\n".join(ttl_parts), 200, {'Content-Type': 'text/turtle; charset=utf-8'})
+        # 현재 컨텍스트 → 추천 곡들
+        if track_uris:
+            ttl_parts.append(
+                f"komc:CurrentContext komc:recommends {', '.join(track_uris)} ."
+            )
+
+        return make_response(
+            "\n".join(ttl_parts),
+            200,
+            {'Content-Type': 'text/turtle; charset=utf-8'}
+        )
 
     except Exception as e:
         print(f"[Context Gen Error] {e}")
         return str(e), 500
-
 # =========================================================
 # 4. 검색 & 파일 제공 API
 # =========================================================
