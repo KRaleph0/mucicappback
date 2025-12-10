@@ -375,6 +375,83 @@ def get_ttl():
         conn = get_db_connection()
         cursor = conn.cursor()
         
+        # 1. DB에서 영화 목록 조회 (랭킹 순)
+        cursor.execute("""
+            SELECT m.movie_id, m.title, m.rank, m.poster_url, 
+                   t.track_id, t.track_title, t.artist_name, t.preview_url, a.album_cover_url
+            FROM MOVIES m
+            LEFT JOIN MOVIE_OSTS mo ON m.movie_id = mo.movie_id
+            LEFT JOIN TRACKS t ON mo.track_id = t.track_id
+            LEFT JOIN ALBUMS a ON t.album_id = a.album_id
+            WHERE m.rank <= 10 
+            ORDER BY m.rank ASC
+        """)
+        rows = cursor.fetchall()
+        
+        ttl = """@prefix schema: <http://schema.org/> .
+@prefix komc: <https://knowledgemap.kr/komc/def/> .
+@prefix tag: <https://knowledgemap.kr/komc/def/tag/> .
+"""
+        # 2. 중복 방지용 Set (이미 처리한 영화 제목 저장)
+        processed_titles = set()
+
+        for row in rows:
+            mid, mtitle, rank, mposter, tid, ttitle, artist, preview, cover = row
+            
+            # [핵심] 이미 처리한 영화 제목이면 건너뜀 (중복 방지)
+            if mtitle in processed_titles:
+                continue
+            
+            processed_titles.add(mtitle)
+
+            # 3. 데이터 정제
+            m_uri = base64.urlsafe_b64encode(mid.encode()).decode().rstrip("=")
+            mposter = mposter or "img/playlist-placeholder.png"
+            
+            # 트랙 정보가 없으면 기본값 설정
+            # (tid가 있으면 tid 사용, 없으면 영화기반 임시 ID)
+            t_uri = tid if tid else f"{m_uri}_ost"
+            ttitle = ttitle or f"{mtitle} (OST 정보 없음)"
+            artist = artist or "Unknown Artist"
+            cover = cover or mposter # 앨범 커버 없으면 영화 포스터 사용
+            preview = preview or ""
+
+            # 4. 태그 조회 (트랙이 있는 경우만)
+            tags_str = ""
+            if tid:
+                try:
+                    tag_cursor = conn.cursor()
+                    tag_cursor.execute("SELECT tag_id FROM TRACK_TAGS WHERE track_id=:1", [tid])
+                    tags = [r[0].replace('tag:', '') for r in tag_cursor.fetchall()]
+                    if tags:
+                        tags_str = f"    komc:relatedTag tag:{', tag:'.join(tags)} ;"
+                except: pass
+
+            # 5. TTL 생성
+            ttl += f"""
+<https://knowledgemap.kr/komc/resource/movie/{m_uri}> a schema:Movie ;
+    schema:name "{mtitle}" ;
+    schema:image "{mposter}" ;
+    komc:rank {rank} .
+
+<https://knowledgemap.kr/komc/resource/track/{t_uri}> a schema:MusicRecording ;
+    schema:name "{ttitle}" ;
+    schema:byArtist "{artist}" ;
+    schema:image "{cover}" ;
+    schema:audio "{preview}" ;
+    komc:featuredIn <https://knowledgemap.kr/komc/resource/movie/{m_uri}> ;
+{tags_str}
+    schema:genre "Movie Soundtrack" .
+"""
+        return Response(ttl, mimetype='text/turtle')
+
+    except Exception as e:
+        print(f"TTL Error: {e}")
+        return f"# Error: {e}", 500
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
         # [핵심] 영화와 OST 정보를 조인해서 가져옴 (랭킹 순)
         # 영화 정보만 있고 OST가 없어도 영화는 나오도록 LEFT JOIN 사용
         query = """
