@@ -124,7 +124,7 @@ def get_today_holiday():
         return None
     except: return None
 
-# --- 4. KOBIS/Spotify 검색 ---
+# --- 4. 검색/저장 로직 ---
 def get_kobis_metadata(movie_name):
     try:
         res = requests.get(KOBIS_MOVIE_LIST_URL, params={'key': KOBIS_API_KEY, 'movieNm': movie_name}).json()
@@ -141,16 +141,11 @@ def find_best_track(titles, headers):
         except: pass
     return None
 
-# --- [핵심 디버깅] 5. 트랙 및 태그 저장 ---
 def save_track_details(track_id, cursor, headers, genres=[]):
     if not track_id: return None
-    print(f"\n[DEBUG] 트랙 저장 시작: {track_id}")  # 로그
-    
     try:
         t_res = requests.get(f"{SPOTIFY_API_BASE}/tracks/{track_id}", headers=headers)
-        if t_res.status_code != 200: 
-            print(f"[ERROR] Spotify API 응답 오류: {t_res.status_code}")
-            return None
+        if t_res.status_code != 200: return None
         t_data = t_res.json()
         a_res = requests.get(f"{SPOTIFY_API_BASE}/audio-features/{track_id}", headers=headers)
         a_data = a_res.json() if a_res.status_code == 200 else {}
@@ -163,21 +158,16 @@ def save_track_details(track_id, cursor, headers, genres=[]):
         bpm = a_data.get('tempo', 0); k_int = a_data.get('key', -1); dur = ms_to_iso_duration(t_data.get('duration_ms', 0))
         mkey = PITCH_CLASS[k_int] if 0 <= k_int < 12 else 'Unknown'
 
-        # 앨범 저장
         if aid:
             cursor.execute("MERGE INTO ALBUMS USING dual ON (album_id=:1) WHEN NOT MATCHED THEN INSERT (album_id, album_cover_url) VALUES (:1, :2)", [aid, img])
         
-        # 트랙 저장
-        print(f"[DEBUG] TRACKS 테이블 저장 시도...")
         cursor.execute("""
             MERGE INTO TRACKS t USING dual ON (t.track_id=:tid)
             WHEN MATCHED THEN UPDATE SET t.bpm=:bpm, t.music_key=:mkey, t.duration=:dur, t.image_url=:img
             WHEN NOT MATCHED THEN INSERT (track_id, track_title, artist_name, album_id, preview_url, image_url, bpm, music_key, duration)
             VALUES (:tid, :title, :artist, :aid, :prev, :img, :bpm, :mkey, :dur)
         """, {'tid':track_id, 'title':title, 'artist':artist, 'aid':aid, 'prev':prev, 'img':img, 'bpm':bpm, 'mkey':mkey, 'dur':dur})
-        print(f"[DEBUG] TRACKS 저장 성공")
 
-        # 태그 생성 로직
         tags = set(["tag:Spotify"])
         if genres: tags.add("tag:MovieOST")
         e = a_data.get('energy', 0); v = a_data.get('valence', 0)
@@ -195,27 +185,13 @@ def save_track_details(track_id, cursor, headers, genres=[]):
         if skos_manager:
             for t in tags: final_tags.update(skos_manager.get_broader_tags(t))
 
-        # 태그 저장 (상세 로그)
-        print(f"[DEBUG] 저장할 태그 목록: {final_tags}")
-        count = 0
         for t in final_tags:
-            try:
-                cursor.execute("""
-                    MERGE INTO TRACK_TAGS t USING (SELECT :1 AS tid, :2 AS tag FROM dual) s 
-                    ON (t.track_id = s.tid AND t.tag_id = s.tag) 
-                    WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.tid, s.tag)
-                """, [track_id, t])
-                count += 1
-            except Exception as e:
-                print(f"[ERROR] 태그 '{t}' 저장 실패: {e}")
-        
-        print(f"[DEBUG] 태그 {count}개 저장 완료")
+            try: cursor.execute("MERGE INTO TRACK_TAGS t USING (SELECT :1 AS tid, :2 AS tag FROM dual) s ON (t.track_id = s.tid AND t.tag_id = s.tag) WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.tid, s.tag)", [track_id, t])
+            except: pass
         
         cursor.connection.commit()
         return t_data
-    except Exception as e:
-        print(f"[CRITICAL ERROR] save_track_details 실패: {e}")
-        return None
+    except: return None
 
 def update_box_office_data():
     print("[Batch] 업데이트 시작...")
@@ -229,8 +205,21 @@ def update_box_office_data():
             title = movie['movieNm']; rank = int(movie['rank'])
             genres, title_en, title_og = get_kobis_metadata(title)
             
+            # 영화 정보 저장 (TMDB 포스터 조회 시도)
+            poster_url = None
             try:
-                cursor.execute("MERGE INTO MOVIES m USING (SELECT :mid AS mid FROM dual) d ON (m.movie_id=d.mid) WHEN MATCHED THEN UPDATE SET rank=:rank WHEN NOT MATCHED THEN INSERT (movie_id, title, rank) VALUES (:mid, :title, :rank)", {'mid':title, 'title':title, 'rank':rank})
+                tmdb_res = requests.get("https://api.themoviedb.org/3/search/movie", params={"api_key": TMDB_API_KEY, "query": title, "language": "ko-KR"}).json()
+                if tmdb_res.get('results'):
+                    poster_url = f"https://image.tmdb.org/t/p/w500{tmdb_res['results'][0]['poster_path']}"
+            except: pass
+
+            try:
+                cursor.execute("""
+                    MERGE INTO MOVIES m USING (SELECT :mid AS mid FROM dual) d 
+                    ON (m.movie_id=d.mid) 
+                    WHEN MATCHED THEN UPDATE SET rank=:rank, poster_url=:poster 
+                    WHEN NOT MATCHED THEN INSERT (movie_id, title, rank, poster_url) VALUES (:mid, :title, :rank, :poster)
+                """, {'mid':title, 'title':title, 'rank':rank, 'poster':poster_url})
                 conn.commit()
             except: pass
 
@@ -248,68 +237,68 @@ def update_box_office_data():
 
 # --- API 라우트 ---
 
-# [핵심 디버깅] 태그 추가 API
-@app.route('/api/track/<tid>/tags', methods=['POST'])
-def api_add_tags(tid):
-    print(f"\n[API DEBUG] 태그 추가 요청 - Track ID: {tid}") # 로그
-    data = request.json
-    new_tags = data.get('tags', [])
-    user_id = data.get('user_id')
-    
-    print(f"[API DEBUG] 요청 데이터: {data}")
+# [NEW] 프로필 정보 조회
+@app.route('/api/user/profile', methods=['POST'])
+def api_get_profile():
+    d = request.json
+    uid = d.get('user_id')
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+        cur.execute("SELECT user_id, nickname, profile_img, role FROM USERS WHERE user_id=:1", [uid])
+        u = cur.fetchone()
+        if u:
+            return jsonify({"user": {"id":u[0], "nickname":u[1], "profile_img":u[2], "role":u[3]}})
+        return jsonify({"error": "User not found"}), 404
+    except Exception as e: return jsonify({"error": str(e)}), 500
 
-    if not new_tags: return jsonify({"error": "태그 없음"}), 400
+# [NEW] 프로필 업데이트 (닉네임/이미지)
+@app.route('/api/user/update', methods=['POST'])
+def api_update_profile():
+    d = request.json
+    uid = d.get('user_id')
+    new_nick = d.get('nickname')
+    new_img = d.get('profile_img') # 이미지 URL 또는 경로
     
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # 권한 체크
-        cursor.execute("SELECT role FROM USERS WHERE user_id=:1", [user_id])
-        user = cursor.fetchone()
-        if not user or user[0] != 'admin':
-             print(f"[API WARN] 권한 없음 (User: {user_id})")
-             return jsonify({"error": "관리자 권한 필요"}), 403
+        conn = get_db_connection(); cur = conn.cursor()
+        if new_nick:
+            cur.execute("UPDATE USERS SET nickname=:1 WHERE user_id=:2", [new_nick, uid])
+        if new_img:
+            cur.execute("UPDATE USERS SET profile_img=:1 WHERE user_id=:2", [new_img, uid])
+        conn.commit()
+        return jsonify({"message": "프로필이 업데이트되었습니다."})
+    except Exception as e: return jsonify({"error": str(e)}), 500
+
+@app.route('/api/track/<tid>/tags', methods=['POST'])
+def api_add_tags(tid):
+    d = request.json; new_tags = d.get('tags', []); uid = d.get('user_id')
+    if not new_tags: return jsonify({"error": "No tags"}), 400
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+        cur.execute("SELECT role FROM USERS WHERE user_id=:1", [uid])
+        user = cur.fetchone()
+        if not user or user[0] != 'admin': return jsonify({"error": "관리자만 가능합니다."}), 403
             
-        added_count = 0
         for tag in new_tags:
             tag = tag.strip()
             if not tag: continue
             if not tag.startswith('tag:'): tag = f"tag:{tag}"
-            
             tags_to_add = {tag}
-            if skos_manager:
-                tags_to_add.update(skos_manager.get_broader_tags(tag))
-            
-            print(f"[API DEBUG] 확장된 태그: {tags_to_add}")
-
+            if skos_manager: tags_to_add.update(skos_manager.get_broader_tags(tag))
             for t in tags_to_add:
-                try:
-                    # 명시적 INSERT 시도 (MERGE 대신)
-                    cursor.execute("""
-                        MERGE INTO TRACK_TAGS t USING (SELECT :1 AS tid, :2 AS tag FROM dual) s 
-                        ON (t.track_id = s.tid AND t.tag_id = s.tag) 
-                        WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.tid, s.tag)
-                    """, [tid, t])
-                    added_count += 1
-                except Exception as db_err:
-                     print(f"[API ERROR] 태그 DB 저장 실패 ({t}): {db_err}")
-        
+                try: cursor.execute("MERGE INTO TRACK_TAGS t USING (SELECT :1 AS tid, :2 AS tag FROM dual) s ON (t.track_id = s.tid AND t.tag_id = s.tag) WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.tid, s.tag)", [tid, t])
+                except: pass
         conn.commit()
-        print(f"[API SUCCESS] 총 {added_count}개 태그 저장됨")
-        return jsonify({"message": f"{added_count}개 태그 저장 완료"})
-    except Exception as e:
-        print(f"[API CRITICAL] 태그 추가 API 에러: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"message": "Saved"})
+    except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route('/api/track/<tid>/tags', methods=['GET'])
 def api_get_tags(tid):
     try:
-        conn = get_db_connection(); cursor = conn.cursor()
+        conn = get_db_connection(); cur = conn.cursor()
         cursor.execute("SELECT tag_id FROM TRACK_TAGS WHERE track_id=:1", [tid])
-        tags = [r[0].replace('tag:', '') for r in cursor.fetchall()]
-        return jsonify(tags)
-    except Exception as e: return jsonify({"error": str(e)}), 500
+        return jsonify([r[0].replace('tag:', '') for r in cursor.fetchall()])
+    except: return jsonify([])
 
 @app.route('/api/spotify-token', methods=['GET'])
 def api_get_token():
@@ -318,10 +307,8 @@ def api_get_token():
 
 @app.route('/api/search', methods=['GET'])
 def api_search():
-    query = request.args.get('q', '')
-    if not query: return jsonify({"error": "Query required"}), 400
     try:
-        res = requests.get(f"{SPOTIFY_API_BASE}/search", headers=get_spotify_headers(), params={"q": query, "type": "track", "limit": 20, "market": "KR"})
+        res = requests.get(f"{SPOTIFY_API_BASE}/search", headers=get_spotify_headers(), params={"q": request.args.get('q'), "type": "track", "limit": 20, "market": "KR"})
         return jsonify(res.json())
     except Exception as e: return jsonify({"error": str(e)}), 500
 
@@ -333,8 +320,8 @@ def api_track(tid):
         r = cur.fetchone()
         if r and r[3]: return jsonify({"id":tid, "title":r[0], "artist":r[1], "image":r[2], "bpm":r[3], "key":r[4], "duration":r[5], "source":"DB"})
         save_track_details(tid, cur, get_spotify_headers(), [])
-        return jsonify({"message": "Fetched from Spotify"})
-    except Exception as e: return jsonify({"error": str(e)}), 500
+        return jsonify({"message": "Fetched"})
+    except: return jsonify({"error": "Error"}), 500
 
 @app.route('/api/recommend/context', methods=['GET'])
 def api_recommend_context():
@@ -348,7 +335,7 @@ def api_recommend_context():
         cursor.execute(f"SELECT t.track_title, t.artist_name, t.image_url, t.preview_url FROM TRACKS t JOIN TRACK_TAGS tt ON t.track_id = tt.track_id WHERE tt.tag_id IN ({placeholders}) ORDER BY DBMS_RANDOM.VALUE FETCH FIRST 6 ROWS ONLY", bind_vars)
         tracks = [{"title": r[0], "artist": r[1], "cover": r[2], "preview": r[3]} for r in cursor.fetchall()]
         return jsonify({"message": f"오늘 날씨: {weather}", "tracks": tracks, "tags": [t.replace('tag:', '') for t in target_tags]})
-    except Exception as e: return jsonify({"error": str(e)}), 500
+    except: return jsonify({"error": "Error"}), 500
 
 @app.route('/api/auth/signup', methods=['POST'])
 def api_signup():
@@ -369,7 +356,7 @@ def api_login():
         cur.execute("SELECT user_id, password, nickname, profile_img, role FROM USERS WHERE user_id=:1", [uid])
         u = cur.fetchone()
         if u and check_password_hash(u[1], pw): return jsonify({"message": "Success", "user": {"id": u[0], "nickname": u[2], "profile_img": u[3], "role": u[4]}})
-        return jsonify({"error": "Invalid credentials"}), 401
+        return jsonify({"error": "Invalid"}), 401
     except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route('/api/admin/logs', methods=['POST'])
@@ -381,16 +368,15 @@ def api_logs():
         r = cur.fetchone()
         if not r or r[0] != 'admin': return jsonify({"error": "No permission"}), 403
         cur.execute("SELECT target_id, previous_value, new_value, user_id, created_at, user_ip FROM MODIFICATION_LOGS ORDER BY created_at DESC FETCH FIRST 50 ROWS ONLY")
-        logs = [{"movie":r[0], "old":r[1], "new":r[2], "user":r[3], "date":r[4].strftime("%Y-%m-%d %H:%M"), "ip":r[5]} for r in cur.fetchall()]
-        return jsonify(logs)
-    except Exception as e: return jsonify({"error": str(e)}), 500
+        return jsonify([{"movie":r[0], "old":r[1], "new":r[2], "user":r[3], "date":r[4].strftime("%Y-%m-%d %H:%M"), "ip":r[5]} for r in cur.fetchall()])
+    except: return jsonify({"error": "Error"}), 500
 
 @app.route('/api/movie/<mid>/update-ost', methods=['POST'])
 def api_up_ost(mid):
     d = request.json; link = d.get('spotifyUrl'); uid = d.get('user_id', 'Guest'); ip = request.remote_addr
     try:
         conn = get_db_connection(); cur = conn.cursor()
-        real_mid = mid # (디코딩 생략)
+        real_mid = mid
         tid = extract_spotify_id(link)
         if not tid: return jsonify({"error": "Invalid Link"}), 400
         save_track_details(tid, cur, get_spotify_headers(), [])
@@ -404,16 +390,44 @@ def api_up_ost(mid):
 @app.route('/api/admin/update-movies', methods=['POST'])
 def api_adm_update(): return jsonify({"message": update_box_office_data()})
 
+# [수정] TTL 생성 시 영화 포스터가 NULL이면 앨범 아트로 대체
 @app.route('/api/data/box-office.ttl', methods=['GET'])
 def get_ttl():
     try:
         conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("SELECT m.movie_id, m.title, m.rank, m.poster_url, t.track_id, t.track_title, t.artist_name, t.preview_url, a.album_cover_url FROM MOVIES m LEFT JOIN MOVIE_OSTS mo ON m.movie_id=mo.movie_id LEFT JOIN TRACKS t ON mo.track_id=t.track_id LEFT JOIN ALBUMS a ON t.album_id=a.album_id WHERE m.rank<=10 ORDER BY m.rank ASC")
-        rows = cur.fetchall()
+        cur.execute("""
+            SELECT m.movie_id, m.title, m.rank, m.poster_url, 
+                   t.track_id, t.track_title, t.artist_name, t.preview_url, a.album_cover_url
+            FROM MOVIES m
+            LEFT JOIN MOVIE_OSTS mo ON m.movie_id = mo.movie_id
+            LEFT JOIN TRACKS t ON mo.track_id = t.track_id
+            LEFT JOIN ALBUMS a ON t.album_id = a.album_id
+            WHERE m.rank <= 10 ORDER BY m.rank ASC
+        """)
+        rows = cursor.fetchall()
         ttl = "@prefix schema: <http://schema.org/> .\n@prefix komc: <https://knowledgemap.kr/komc/def/> .\n@prefix tag: <https://knowledgemap.kr/komc/def/tag/> .\n"
+        
+        seen = set()
         for r in rows:
-            mid = base64.urlsafe_b64encode(r[0].encode()).decode().rstrip("="); tid = r[4] or f"{mid}_ost"
-            ttl += f"<https://knowledgemap.kr/komc/resource/movie/{mid}> a schema:Movie ; schema:name \"{r[1]}\" .\n<https://knowledgemap.kr/komc/resource/track/{tid}> a schema:MusicRecording ; komc:featuredIn <https://knowledgemap.kr/komc/resource/movie/{mid}> .\n"
+            mid_val, mtitle = r[0], r[1]
+            if mtitle in seen: continue
+            seen.add(mtitle)
+
+            mid = base64.urlsafe_b64encode(mid_val.encode()).decode().rstrip("=")
+            # [핵심] 영화 포스터가 없으면(None) -> 앨범 커버(r[8]) -> 기본 이미지 순으로 대체
+            mposter = r[3] or r[8] or "img/playlist-placeholder.png"
+            
+            tid = r[4] or f"{mid}_ost"
+            ttl += f"""
+<https://knowledgemap.kr/komc/resource/movie/{mid}> a schema:Movie ;
+    schema:name "{mtitle}" ;
+    schema:image "{mposter}" ;
+    komc:rank {r[2]} .
+<https://knowledgemap.kr/komc/resource/track/{tid}> a schema:MusicRecording ;
+    schema:name "{r[5] or '정보 없음'}" ;
+    schema:byArtist "{r[6] or 'Unknown'}" ;
+    schema:image "{r[8] or mposter}" ;
+    komc:featuredIn <https://knowledgemap.kr/komc/resource/movie/{mid}> .\n"""
         return Response(ttl, mimetype='text/turtle')
     except Exception as e: return f"# Error: {e}", 500
 
