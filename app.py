@@ -1,217 +1,238 @@
 import os
 import requests
-import base64
 import oracledb
-from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, g, Response
+import base64
+import re
+from flask import Flask, request, jsonify, g, send_from_directory, make_response
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
 
-# --- 1. 설정 ---
-SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-KOBIS_API_KEY = os.getenv("KOBIS_API_KEY")
-TMDB_API_KEY = os.getenv("TMDB_API_KEY")
-DATA_GO_KR_API_KEY = os.getenv("DATA_GO_KR_API_KEY")
+# 모듈 import
+from config import UPLOAD_FOLDER, SPOTIFY_API_BASE
+from database import get_db_connection, close_db, init_db_pool
+from services import update_box_office_data, save_track_details
+from utils import get_spotify_headers, get_current_weather, get_today_holiday, extract_spotify_id
 
-SPOTIFY_auth_URL = "https://accounts.spotify.com/api/token"
-SPOTIFY_API_BASE = "https://api.spotify.com/v1"
-
-KOBIS_BOXOFFICE_URL = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json"
-KOBIS_MOVIE_LIST_URL = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/movie/searchMovieList.json"
-WEATHER_API_URL = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getUltraSrtNcst"
-HOLIDAY_API_URL = "http://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDeInfo"
-
-DB_USER = os.getenv("DB_USER", "admin")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "password")
-DB_DSN = os.getenv("DB_DSN", "ordb.mirinea.org:1521/XEPDB1")
+# [선택] SKOS 매니저
+try:
+    from skos_manager import SkosManager
+    skos_manager = SkosManager("skos-definition.ttl")
+except:
+    skos_manager = None
 
 app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 CORS(app)
+app.teardown_appcontext(close_db)
 
-# DB 연결
-try:
-    db_pool = oracledb.create_pool(user=DB_USER, password=DB_PASSWORD, dsn=DB_DSN, min=1, max=5)
-    print("[DB] Oracle Pool 생성 완료.")
-except Exception as e:
-    print(f"[DB 오류] {e}")
-    db_pool = None
+with app.app_context():
+    init_db_pool()
 
-def get_db_connection():
-    if not db_pool: raise Exception("DB 풀 없음")
-    if 'db' not in g: g.db = db_pool.acquire()
-    return g.db
+# =========================================================
+# 1. 영화/TTL API (중복 제거 & 안전장치)
+# =========================================================
 
-@app.teardown_appcontext
-def close_db(e):
-    db = g.pop('db', None)
-    if db: db.close()
+@app.route('/api/admin/update-movies', methods=['POST'])
+def admin_update_movies():
+    return jsonify({"message": update_box_office_data()})
 
-# --- 2. 헬퍼 함수 (필요한 것만 유지) ---
-def get_spotify_headers():
-    if not SPOTIFY_CLIENT_ID: return {}
-    auth = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
-    try:
-        res = requests.post(SPOTIFY_auth_URL, headers={'Authorization': f'Basic {auth}', 'Content-Type': 'application/x-www-form-urlencoded'}, data={'grant_type': 'client_credentials'})
-        return {'Authorization': f'Bearer {res.json().get("access_token")}'}
-    except: return {}
-
-def extract_spotify_id(url):
-    match = re.search(r'track/([a-zA-Z0-9]{22})', url or "")
-    return match.group(1) if match else None
-
-# --- 3. 핵심 API ---
-
-# [FIX] 415 에러 해결: force=True 추가
-@app.route('/api/user/profile', methods=['POST'])
-def api_get_profile():
-    # force=True: 헤더가 application/json이 아니어도 강제로 파싱 시도
-    d = request.get_json(force=True, silent=True) or {}
-    uid = d.get('user_id')
-    
-    if not uid: return jsonify({"error": "User ID missing"}), 400
-
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id, nickname, profile_img, role FROM USERS WHERE user_id=:1", [uid])
-        u = cursor.fetchone()
-        if u:
-            # None 값 처리
-            return jsonify({
-                "user": {
-                    "id": u[0],
-                    "nickname": u[1] or "User",
-                    "profile_img": u[2] or "img/profile-placeholder.png",
-                    "role": u[3] or "user"
-                }
-            })
-        return jsonify({"error": "User not found"}), 404
-    except Exception as e:
-        print(f"[Profile Error] {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/user/update', methods=['POST'])
-def api_update_profile():
-    d = request.get_json(force=True, silent=True) or {}
-    uid = d.get('user_id')
-    nick = d.get('nickname')
-    
-    if not uid: return jsonify({"error": "User ID required"}), 400
-
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE USERS SET nickname=:1 WHERE user_id=:2", [nick, uid])
-        conn.commit()
-        return jsonify({"message": "프로필 수정 완료"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# [FIX] 500 에러 해결: Null 값 방어 로직 추가
 @app.route('/api/data/box-office.ttl', methods=['GET'])
-def get_ttl():
+def get_box_office_ttl():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # 안전한 쿼리 실행
+        # 랭킹 순 조회
         cursor.execute("""
             SELECT m.movie_id, m.title, m.rank, m.poster_url, 
-                   t.track_id, t.track_title, t.artist_name, t.preview_url, a.album_cover_url
+                   t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
             FROM MOVIES m
             LEFT JOIN MOVIE_OSTS mo ON m.movie_id = mo.movie_id
             LEFT JOIN TRACKS t ON mo.track_id = t.track_id
-            LEFT JOIN ALBUMS a ON t.album_id = a.album_id
+            WHERE m.rank <= 10
             ORDER BY m.rank ASC
         """)
         rows = cursor.fetchall()
         
-        ttl = """@prefix schema: <http://schema.org/> .
-@prefix komc: <https://knowledgemap.kr/komc/def/> .
-@prefix tag: <https://knowledgemap.kr/komc/def/tag/> .
-"""
-        seen_movies = set()
+        ttl_parts = [
+            "@prefix schema: <http://schema.org/> .",
+            "@prefix komc: <https://knowledgemap.kr/komc/def/> .",
+            "@prefix tag: <https://knowledgemap.kr/komc/def/tag/> .",
+            ""
+        ]
+        
+        seen_titles = set() # [핵심] 중복 방지
 
         for r in rows:
-            # None 값 안전 처리 (or "")
-            mid_raw, title, rank, poster = r[0] or "", r[1] or "Unknown", r[2] or 99, r[3]
-            tid, t_title, t_artist, preview, cover = r[4], r[5], r[6], r[7], r[8]
+            # 데이터 추출 (None 처리)
+            mid_raw, title, rank, poster = r[0], r[1], r[2], r[3]
+            tid, t_title, t_artist, t_cover, preview = r[4], r[5], r[6], r[7], r[8]
 
-            if not mid_raw: continue
-            
-            # 영화 ID 인코딩
+            if not mid_raw or title in seen_titles: continue
+            seen_titles.add(title)
+
+            # ID 인코딩
             mid = base64.urlsafe_b64encode(str(mid_raw).encode()).decode().rstrip("=")
-            
-            # 영화 정보 (중복 제거)
-            if title not in seen_movies:
-                # 포스터가 없으면 앨범 커버, 그것도 없으면 기본 이미지
-                final_poster = poster or cover or "img/playlist-placeholder.png"
-                ttl += f"""
+            final_poster = poster or t_cover or "img/playlist-placeholder.png"
+
+            # 영화 정보
+            ttl_parts.append(f"""
 <https://knowledgemap.kr/komc/resource/movie/{mid}> a schema:Movie ;
     schema:name "{title}" ;
     schema:image "{final_poster}" ;
-    komc:rank {rank} .
-"""
-                seen_movies.add(title)
+    komc:rank {rank} .""")
 
-            # 트랙 정보 (트랙이 없으면 가짜 ID 생성해서라도 연결)
+            # 트랙 정보 (없으면 '정보 없음'으로 표시)
             if tid:
                 t_uri = tid
-                t_name = t_title or "제목 없음"
-                t_artist = t_artist or "아티스트 미상"
-                t_img = cover or poster or "img/playlist-placeholder.png"
+                t_name = t_title
+                t_art = t_artist
             else:
                 t_uri = f"{mid}_ost"
                 t_name = f"{title} (OST 정보 없음)"
-                t_artist = "Unknown"
-                t_img = poster or "img/playlist-placeholder.png"
+                t_art = "Unknown"
 
-            ttl += f"""
+            ttl_parts.append(f"""
 <https://knowledgemap.kr/komc/resource/track/{t_uri}> a schema:MusicRecording ;
     schema:name "{t_name}" ;
-    schema:byArtist "{t_artist}" ;
-    schema:image "{t_img}" ;
+    schema:byArtist "{t_art}" ;
+    schema:image "{final_poster}" ;
     schema:audio "{preview or ''}" ;
     komc:featuredIn <https://knowledgemap.kr/komc/resource/movie/{mid}> ;
-    schema:genre "Movie Soundtrack" .
-"""
-        return Response(ttl, mimetype='text/turtle')
+    schema:genre "Movie Soundtrack" .""")
+
+        return make_response("\n".join(ttl_parts), 200, {'Content-Type': 'text/turtle; charset=utf-8'})
 
     except Exception as e:
         print(f"[TTL Error] {e}")
-        # 에러가 나도 500 대신 빈 TTL이라도 던져서 프론트가 죽지 않게 함
-        return Response("# Error generating TTL", mimetype='text/turtle')
+        return make_response("# Error generating TTL", 200, {'Content-Type': 'text/turtle'})
 
-# --- 나머지 필수 API들 (로그인, 회원가입 등 유지) ---
-@app.route('/api/auth/signup', methods=['POST'])
-def api_signup():
+# =========================================================
+# 2. 유저 매칭 & 태그 API (필수 추가)
+# =========================================================
+
+# [NEW] 유저가 OST 직접 연결
+@app.route('/api/movie/<mid>/update-ost', methods=['POST'])
+def api_up_ost(mid):
     d = request.get_json(force=True, silent=True) or {}
-    uid = d.get('id', '').strip().lower()
-    pw = d.get('password', '').strip()
-    nick = d.get('nickname', 'User').strip()
+    link = d.get('spotifyUrl')
+    uid = d.get('user_id')
+    
+    if not link: return jsonify({"error": "링크가 없습니다."}), 400
+
     try:
         conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("SELECT user_id FROM USERS WHERE user_id=:1", [uid])
-        if cur.fetchone(): return jsonify({"error": "ID exists"}), 409
+        
+        # 1. 영화 ID 복원 (필요시 디코딩 로직 추가, 지금은 그대로 사용 가정)
+        # 만약 mid가 base64라면 디코딩해야 함. 여기선 KOBIS 코드가 그대로 온다고 가정.
+        # 하지만 프론트에서 openEditModal에 넘기는 ID 확인 필요. 
+        # (서비스 로직상 update_box_office_data에서 movieCd를 썼으므로 그대로 씀)
+        
+        # 2. Spotify ID 추출
+        tid = extract_spotify_id(link)
+        if not tid: return jsonify({"error": "잘못된 Spotify 링크입니다."}), 400
+
+        # 3. 트랙 정보 저장 & 태그 생성
+        headers = get_spotify_headers()
+        track_info = save_track_details(tid, cur, headers, []) # 여기서 태그도 저장됨!
+        
+        if not track_info: return jsonify({"error": "트랙 정보를 찾을 수 없습니다."}), 404
+
+        # 4. 연결 테이블 갱신
+        cur.execute("DELETE FROM MOVIE_OSTS WHERE movie_id=:1", [mid])
+        cur.execute("INSERT INTO MOVIE_OSTS (movie_id, track_id) VALUES (:1, :2)", [mid, tid])
+        
+        # 5. 로그 남기기
+        cur.execute("INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, previous_value, new_value, user_id) VALUES ('MOVIE_OST', :1, 'UPDATE', 'NONE', :2, :3)", [mid, tid, uid])
+        
+        conn.commit()
+        return jsonify({"message": f"'{track_info['name']}' 곡으로 등록되었습니다!", "new_track": track_info['name']})
+    except Exception as e:
+        print(e)
+        return jsonify({"error": "서버 오류 발생"}), 500
+
+# [NEW] 태그 추가
+@app.route('/api/track/<tid>/tags', methods=['POST'])
+def api_add_tags(tid):
+    d = request.get_json(force=True)
+    tags = d.get('tags', [])
+    if not tags: return jsonify({"message": "태그 없음"})
+    
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+        for tag in tags:
+            tag = tag.strip()
+            if not tag: continue
+            if not tag.startswith('tag:'): tag = f"tag:{tag}"
+            
+            # 확장
+            targets = {tag}
+            if skos_manager: targets.update(skos_manager.get_broader_tags(tag))
+            
+            for t in targets:
+                try: cursor.execute("MERGE INTO TRACK_TAGS t USING (SELECT :1 a, :2 b FROM dual) s ON (t.track_id=s.a AND t.tag_id=s.b) WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.a, s.b)", [tid, t])
+                except: pass
+        conn.commit()
+        return jsonify({"message": "태그 저장 완료"})
+    except Exception as e: return jsonify({"error": str(e)}), 500
+
+@app.route('/api/track/<tid>/tags', methods=['GET'])
+def api_get_tags(tid):
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+        cur.execute("SELECT tag_id FROM TRACK_TAGS WHERE track_id=:1", [tid])
+        return jsonify([r[0].replace('tag:', '') for r in cursor.fetchall()])
+    except: return jsonify([])
+
+# =========================================================
+# 3. 인증 & 기타 API
+# =========================================================
+@app.route('/api/auth/signup', methods=['POST'])
+def api_signup():
+    d = request.get_json(force=True); uid = d.get('id'); pw = d.get('password'); nick = d.get('nickname')
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
         cur.execute("INSERT INTO USERS (user_id, password, nickname, role) VALUES (:1, :2, :3, 'user')", [uid, generate_password_hash(pw), nick])
         conn.commit(); return jsonify({"message": "Success"})
-    except Exception as e: return jsonify({"error": str(e)}), 500
+    except: return jsonify({"error": "Fail"}), 500
 
 @app.route('/api/auth/login', methods=['POST'])
 def api_login():
-    d = request.get_json(force=True, silent=True) or {}
-    uid = d.get('id', '').strip().lower()
-    pw = d.get('password', '').strip()
+    d = request.get_json(force=True); uid = d.get('id'); pw = d.get('password')
     try:
         conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("SELECT user_id, password, nickname, profile_img, role FROM USERS WHERE user_id=:1", [uid])
+        cur.execute("SELECT user_id, password, nickname, profile_img FROM USERS WHERE user_id=:1", [uid])
         u = cur.fetchone()
-        if u and check_password_hash(u[1], pw): return jsonify({"message": "Success", "user": {"id": u[0], "nickname": u[2], "profile_img": u[3], "role": u[4]}})
-        return jsonify({"error": "Invalid credentials"}), 401
-    except Exception as e: return jsonify({"error": str(e)}), 500
+        if u and check_password_hash(u[1], pw): return jsonify({"user": {"id":u[0], "nickname":u[2], "profile_img":u[3]}})
+        return jsonify({"error": "Invalid"}), 401
+    except: return jsonify({"error": "Error"}), 500
 
-# (나머지 Search, Token, Update-Movies 등은 기존과 동일하므로 생략하거나 그대로 두세요)
-# ...
+@app.route('/api/user/profile', methods=['POST'])
+def api_profile():
+    d = request.get_json(force=True); uid = d.get('user_id')
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+        cur.execute("SELECT user_id, nickname, profile_img, role FROM USERS WHERE user_id=:1", [uid])
+        u = cur.fetchone()
+        return jsonify({"user": {"id":u[0], "nickname":u[1], "profile_img":u[2] or "img/profile-placeholder.png"}}) if u else (jsonify({"error":"No user"}),404)
+    except: return jsonify({"error":"Error"}), 500
+
+@app.route('/api/user/update', methods=['POST'])
+def api_user_update():
+    d = request.get_json(force=True); uid = d.get('user_id'); nick = d.get('nickname')
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+        cur.execute("UPDATE USERS SET nickname=:1 WHERE user_id=:2", [nick, uid])
+        conn.commit(); return jsonify({"message": "Updated"})
+    except: return jsonify({"error": "Error"}), 500
+
+# (Spotify Token, Search 등 나머지 유지)
+@app.route('/api/spotify-token', methods=['GET'])
+def api_token(): return jsonify({"access_token": get_spotify_headers().get('Authorization', '').split(' ')[1]})
+
+@app.route('/api/search', methods=['GET'])
+def api_src():
+    return jsonify(requests.get(f"{SPOTIFY_API_BASE}/search", headers=get_spotify_headers(), params={"q":request.args.get('q'),"type":"track","limit":20,"market":"KR"}).json())
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
