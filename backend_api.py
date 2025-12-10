@@ -7,7 +7,9 @@ from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, g, Response
 from flask_cors import CORS
-
+import uuid
+from werkzeug.utils import secure_filename
+from flask import Flask, request, jsonify, g, Response, send_from_directory
 # --- 1. 설정 ---
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
@@ -32,7 +34,14 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "password")
 DB_DSN = os.getenv("DB_DSN", "ordb.mirinea.org:1521/XEPDB1")
 
 PITCH_CLASS = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+UPLOAD_FOLDER = 'uploads'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
 
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+CORS(app)
 app = Flask(__name__)
 CORS(app)
 
@@ -232,6 +241,52 @@ def update_box_office_data():
                 except: pass
         return "업데이트 완료"
     except Exception as e: return f"Error: {e}"
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+# [NEW] 업로드된 파일 서빙 (이미지 보기용)
+@app.route('/uploads/<name>')
+def download_file(name):
+    return send_from_directory(app.config["UPLOAD_FOLDER"], name)
+
+# [NEW] 프로필 이미지 업로드 API
+@app.route('/api/user/profile-image', methods=['POST'])
+def upload_profile_image():
+    # 1. 파일 존재 확인
+    if 'file' not in request.files:
+        return jsonify({"error": "파일이 없습니다."}), 400
+    file = request.files['file']
+    user_id = request.form.get('user_id')
+    
+    if file.filename == '':
+        return jsonify({"error": "선택된 파일이 없습니다."}), 400
+        
+    if file and allowed_file(file.filename):
+        try:
+            # 2. 파일명 안전하게 변경 (UUID 사용)
+            ext = file.filename.rsplit('.', 1)[1].lower()
+            filename = secure_filename(f"{user_id}_{uuid.uuid4().hex[:8]}.{ext}")
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            
+            # 3. 서버에 저장
+            file.save(filepath)
+            
+            # 4. DB 업데이트 (이미지 경로 저장)
+            # 웹 접근 경로: /uploads/파일명
+            image_url = f"/uploads/{filename}"
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("UPDATE USERS SET profile_img = :1 WHERE user_id = :2", [image_url, user_id])
+            conn.commit()
+            
+            return jsonify({"message": "프로필 이미지가 변경되었습니다.", "image_url": image_url})
+            
+        except Exception as e:
+            print(f"[업로드 에러] {e}")
+            return jsonify({"error": "이미지 저장 중 오류 발생"}), 500
+    else:
+        return jsonify({"error": "허용되지 않는 파일 형식입니다. (png, jpg, jpeg, gif 가능)"}), 400
 
 # --- API ---
 # [수정됨] 상황 기반 추천 (태그 목록도 함께 반환)
