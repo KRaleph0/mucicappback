@@ -1,13 +1,13 @@
-# utils.py
 import re
 import base64
 import requests
+import json
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 import config
 from config import CLOUDFLARE_SECRET_KEY
 
-# --- 텍스트 처리 ---
+# --- 1. 텍스트 처리 및 기타 유틸 ---
 def clean_text(text):
     if not text: return ""
     text = text.lower()
@@ -25,91 +25,106 @@ def ms_to_iso_duration(ms):
     minutes = int((ms / (1000 * 60)) % 60)
     return f"PT{minutes}M{seconds}S"
 
-def extract_spotify_id(url):
-    if len(url) == 22 and re.match(r'^[a-zA-Z0-9]+$', url): return url
-    match = re.search(r'track/([a-zA-Z0-9]{22})', url)
-    return match.group(1) if match else None
-
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in config.ALLOWED_EXTENSIONS
 
+# --- 2. 보안 (Turnstile) ---
 def verify_turnstile(token):
-    """
-    Cloudflare Turnstile 토큰을 검증합니다.
-    Returns: (성공여부 Bool, 에러메시지 String)
-    """
-    if not token:
-        return False, "캡차 토큰이 없습니다."
-    
-    verify_url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-    verify_data = {
-        "secret": CLOUDFLARE_SECRET_KEY,
-        "response": token
-    }
-    
+    if not token: return False, "캡차 토큰이 없습니다."
     try:
-        # Cloudflare 검증 API 호출
-        res = requests.post(verify_url, data=verify_data).json()
-        if res.get("success"):
-            return True, None
-        else:
-            return False, "캡차 인증에 실패했습니다."
-    except Exception as e:
-        print(f"[Turnstile Error] {e}")
-        return False, "보안 검증 중 오류가 발생했습니다."
+        res = requests.post(
+            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+            data={"secret": CLOUDFLARE_SECRET_KEY, "response": token}
+        ).json()
+        return res.get("success"), "캡차 인증 실패"
+    except: return False, "보안 검증 오류"
 
-# --- 외부 API (Spotify 인증, 날씨, 공휴일, 영화정보 조회) ---
+# --- 3. 외부 API 연동 (Spotify) ---
 def get_spotify_headers():
     if not config.SPOTIFY_CLIENT_ID or not config.SPOTIFY_CLIENT_SECRET:
-        raise Exception("Spotify API Key가 설정되지 않음")
-    auth_str = f"{config.SPOTIFY_CLIENT_ID}:{config.SPOTIFY_CLIENT_SECRET}"
-    b64_auth = base64.b64encode(auth_str.encode()).decode()
-    headers = {
-        'Authorization': f'Basic {b64_auth}',
+        raise Exception("Spotify API Key 누락")
+    auth = base64.b64encode(f"{config.SPOTIFY_CLIENT_ID}:{config.SPOTIFY_CLIENT_SECRET}".encode()).decode()
+    res = requests.post(config.SPOTIFY_AUTH_URL, headers={
+        'Authorization': f'Basic {auth}',
         'Content-Type': 'application/x-www-form-urlencoded'
-    }
-    res = requests.post(config.SPOTIFY_AUTH_URL, headers=headers, data={'grant_type': 'client_credentials'})
-    if res.status_code != 200: raise Exception(f"Spotify Auth Failed: {res.status_code}")
+    }, data={'grant_type': 'client_credentials'})
     return {'Authorization': f'Bearer {res.json().get("access_token")}'}
 
+# --- 4. [핵심] 공공데이터 API 연동 (날씨, 휴일) ---
+
 def get_current_weather():
-    if not config.DATA_GO_KR_API_KEY: return None
-    now = datetime.now()
-    base_date = now.strftime("%Y%m%d")
-    if now.minute < 45: now -= timedelta(hours=1)
-    base_time = now.strftime("%H00")
-    params = {'serviceKey': config.DATA_GO_KR_API_KEY, 'pageNo': '1', 'numOfRows': '10', 'dataType': 'JSON', 'base_date': base_date, 'base_time': base_time, 'nx': '60', 'ny': '127'}
+    """기상청 초단기실황 API 호출 -> 'Rain', 'Snow', 'Clear' 반환"""
+    if not config.DATA_GO_KR_API_KEY:
+        print("⚠️ 날씨 API 키가 없습니다.")
+        return "Clear"
+
     try:
-        res = requests.get(config.WEATHER_API_URL, params=params, timeout=5)
+        now = datetime.now()
+        base_date = now.strftime("%Y%m%d")
+        # 매시 45분 이후에 API 업데이트 됨 (안전하게 1시간 전 데이터 요청 가능)
+        if now.minute < 45: now -= timedelta(hours=1)
+        base_time = now.strftime("%H00")
+
+        params = {
+            'serviceKey': config.DATA_GO_KR_API_KEY,
+            'pageNo': '1', 'numOfRows': '10', 'dataType': 'JSON',
+            'base_date': base_date, 'base_time': base_time,
+            'nx': '60', 'ny': '127' # 서울 기준 좌표 (실제 서비스 시 사용자 좌표 필요)
+        }
+        
+        # SSL 인증서 문제 방지를 위해 verify=False 옵션 사용 가능 (개발 환경)
+        res = requests.get(config.WEATHER_API_URL, params=params, timeout=3)
+        if res.status_code != 200: return "Clear"
+
         items = res.json().get('response', {}).get('body', {}).get('items', {}).get('item', [])
+        
+        # PTY: 0=없음, 1=비, 2=비/눈, 3=눈, 5=빗방울, 6=진눈깨비, 7=눈날림
         pty = next((item['obsrValue'] for item in items if item['category'] == 'PTY'), "0")
+        
         if pty in ["1", "5", "2", "6"]: return "Rain"
         if pty in ["3", "7"]: return "Snow"
         return "Clear"
-    except: return "Clear"
+
+    except Exception as e:
+        print(f"[Weather API Error] {e}")
+        return "Clear"
 
 def get_today_holiday():
+    """특일정보 API 호출 -> 오늘이 휴일이면 '휴일명', 아니면 None 반환"""
     if not config.DATA_GO_KR_API_KEY: return None
-    now = datetime.now()
-    params = {'serviceKey': config.DATA_GO_KR_API_KEY, 'solYear': now.year, 'solMonth': f"{now.month:02d}", '_type': 'json'}
+
     try:
-        res = requests.get(config.HOLIDAY_API_URL, params=params, timeout=5)
-        item_list = res.json().get('response', {}).get('body', {}).get('items', {}).get('item', [])
-        if isinstance(item_list, dict): item_list = [item_list]
+        now = datetime.now()
+        params = {
+            'serviceKey': config.DATA_GO_KR_API_KEY,
+            'solYear': now.year, 
+            'solMonth': f"{now.month:02d}",
+            '_type': 'json'
+        }
+        
+        res = requests.get(config.HOLIDAY_API_URL, params=params, timeout=3)
+        items = res.json().get('response', {}).get('body', {}).get('items', {}).get('item', [])
+        
+        if isinstance(items, dict): items = [items] # 결과가 1개면 dict로 옴
+        
         today_str = now.strftime("%Y%m%d")
-        for item in item_list:
+        for item in items:
+            # 날짜 일치하고 실제 공휴일(Y)인 경우
             if str(item.get('locdate')) == today_str and item.get('isHoliday') == 'Y':
                 return item.get('dateName')
         return None
-    except: return None
+
+    except Exception as e:
+        print(f"[Holiday API Error] {e}")
+        return None
 
 def get_kobis_metadata(movie_name):
-    params = {'key': config.KOBIS_API_KEY, 'movieNm': movie_name}
+    """영화 제목으로 장르/영문제목 조회"""
     try:
-        res = requests.get(config.KOBIS_MOVIE_LIST_URL, params=params).json()
+        res = requests.get(config.KOBIS_MOVIE_LIST_URL, params={'key': config.KOBIS_API_KEY, 'movieNm': movie_name}).json()
         mlist = res.get('movieListResult', {}).get('movieList', [])
         if mlist:
             t = mlist[0]
-            return (t.get('genreAlt', '').split(',') if t.get('genreAlt') else []), t.get('movieNmEn', ''), t.get('movieNmOg', '')
+            return (t.get('genreAlt', '').split(','), t.get('movieNmEn', ''), t.get('movieNmOg', ''))
         return [], "", ""
     except: return [], "", ""
