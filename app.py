@@ -65,6 +65,58 @@ def get_box_office_ttl():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        
+        # [수정] JOIN -> LEFT JOIN 변경 (OST 없어도 영화는 나오게)
+        cursor.execute("""
+            SELECT m.movie_id, m.title, m.rank, m.poster_url, 
+                   t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
+            FROM MOVIES m
+            LEFT JOIN MOVIE_OSTS mo ON m.movie_id = mo.movie_id
+            LEFT JOIN TRACKS t ON mo.track_id = t.track_id
+            ORDER BY m.rank ASC
+        """)
+        rows = cursor.fetchall()
+        
+        ttl_parts = [
+            "@prefix schema: <http://schema.org/> .",
+            "@prefix komc: <https://knowledgemap.kr/komc/def/> .",
+            "@prefix tag: <https://knowledgemap.kr/komc/def/tag/> .",
+            "",
+            "# Real-time Box Office Data from DB"
+        ]
+        
+        for row in rows:
+            mid, mtitle, rank, mposter, tid, ttitle, artist, tcover, audio = row
+            
+            # 1. 영화 정보 (항상 생성)
+            ttl_parts.append(f"""
+<https://knowledgemap.kr/resource/movie/{mid}> a schema:Movie ;
+    schema:name "{mtitle}" ;
+    schema:image "{mposter or ''}" ;
+    komc:rank {rank} .""")
+            
+            # 2. 트랙 정보 (있는 경우에만 생성)
+            if tid:
+                ttl_parts.append(f"""
+<https://knowledgemap.kr/resource/track/{tid}> a schema:MusicRecording ;
+    schema:name "{ttitle}" ;
+    schema:byArtist "{artist}" ;
+    schema:image "{tcover}" ;
+    schema:audio "{audio or ''}" ;
+    komc:featuredIn <https://knowledgemap.kr/resource/movie/{mid}> ;
+    komc:relatedTag tag:MovieOST .""")
+        
+        if not rows:
+            ttl_parts.append("# No data found. Please run: curl -X POST http://localhost:5000/api/admin/update-movies")
+
+        return make_response("\n".join(ttl_parts), 200, {'Content-Type': 'text/turtle; charset=utf-8'})
+
+    except Exception as e:
+        print(f"[TTL Gen Error] {e}")
+        return str(e), 500
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
         cursor.execute("""
             SELECT m.movie_id, m.title, m.rank, m.poster_url, 
                    t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
