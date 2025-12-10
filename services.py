@@ -4,7 +4,9 @@ import config
 import database
 import utils
 
-# [변경] 트랙 상세 저장 (유저 매칭 시 사용됨)
+# ---------------------------------------------
+# 1. 트랙 상세 정보 저장 (유저 매칭 시 사용)
+# ---------------------------------------------
 def save_track_details(track_id, cursor, headers, genres=[]):
     if not track_id: return None
     try:
@@ -39,7 +41,7 @@ def save_track_details(track_id, cursor, headers, genres=[]):
 
         # 3. 태그 생성 및 저장
         tags = set(["tag:Spotify"])
-        # 영화 장르 태그 추가
+        # 영화 장르 매핑
         g_map = {"액션":"tag:Action", "SF":"tag:SF", "코미디":"tag:Exciting", "드라마":"tag:Sentimental", "멜로":"tag:Romance", "로맨스":"tag:Romance", "공포":"tag:Tension", "호러":"tag:Tension", "스릴러":"tag:Tension", "범죄":"tag:Tension", "애니메이션":"tag:Animation", "가족":"tag:Rest", "뮤지컬":"tag:Pop"}
         for g in genres:
             for k, val in g_map.items(): 
@@ -69,7 +71,9 @@ def save_track_details(track_id, cursor, headers, genres=[]):
         print(f"[Save Error] {e}")
         return None
 
-# [변경] 박스오피스 업데이트 (영화 정보만 깔끔하게!)
+# ---------------------------------------------
+# 2. 박스오피스 업데이트 (영화 정보만 갱신)
+# ---------------------------------------------
 def update_box_office_data():
     print("[Batch] 박스오피스 업데이트 시작 (영화 정보만 갱신)...")
     conn = None
@@ -91,7 +95,7 @@ def update_box_office_data():
             
             print(f"Processing [{rank}위]: {title}")
 
-            # 2. TMDB에서 포스터 및 추가 정보 가져오기 (단일 소스 활용)
+            # 2. TMDB에서 포스터 가져오기
             poster_url = None
             try:
                 tmdb_res = requests.get("https://api.themoviedb.org/3/search/movie", 
@@ -103,8 +107,7 @@ def update_box_office_data():
             except Exception as e:
                 print(f"   -> TMDB Error: {e}")
 
-            # 3. DB 저장 (영화 정보만!)
-            # OST 자동 매칭 로직은 제거됨 -> 유저가 직접 함
+            # 3. DB 저장 (영화 정보만)
             try:
                 cursor.execute("""
                     MERGE INTO MOVIES m

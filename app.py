@@ -30,7 +30,7 @@ with app.app_context():
     init_db_pool()
 
 # =========================================================
-# 1. 영화/TTL API (중복 제거 & 안전장치)
+# 1. 영화/TTL API
 # =========================================================
 
 @app.route('/api/admin/update-movies', methods=['POST'])
@@ -61,10 +61,9 @@ def get_box_office_ttl():
             ""
         ]
         
-        seen_titles = set() # [핵심] 중복 방지
+        seen_titles = set()
 
         for r in rows:
-            # 데이터 추출 (None 처리)
             mid_raw, title, rank, poster = r[0], r[1], r[2], r[3]
             tid, t_title, t_artist, t_cover, preview = r[4], r[5], r[6], r[7], r[8]
 
@@ -82,7 +81,7 @@ def get_box_office_ttl():
     schema:image "{final_poster}" ;
     komc:rank {rank} .""")
 
-            # 트랙 정보 (없으면 '정보 없음'으로 표시)
+            # 트랙 정보
             if tid:
                 t_uri = tid
                 t_name = t_title
@@ -108,10 +107,9 @@ def get_box_office_ttl():
         return make_response("# Error generating TTL", 200, {'Content-Type': 'text/turtle'})
 
 # =========================================================
-# 2. 유저 매칭 & 태그 API (필수 추가)
+# 2. 유저 매칭 & 태그 API
 # =========================================================
 
-# [NEW] 유저가 OST 직접 연결
 @app.route('/api/movie/<mid>/update-ost', methods=['POST'])
 def api_up_ost(mid):
     d = request.get_json(force=True, silent=True) or {}
@@ -122,27 +120,17 @@ def api_up_ost(mid):
 
     try:
         conn = get_db_connection(); cur = conn.cursor()
-        
-        # 1. 영화 ID 복원 (필요시 디코딩 로직 추가, 지금은 그대로 사용 가정)
-        # 만약 mid가 base64라면 디코딩해야 함. 여기선 KOBIS 코드가 그대로 온다고 가정.
-        # 하지만 프론트에서 openEditModal에 넘기는 ID 확인 필요. 
-        # (서비스 로직상 update_box_office_data에서 movieCd를 썼으므로 그대로 씀)
-        
-        # 2. Spotify ID 추출
         tid = extract_spotify_id(link)
         if not tid: return jsonify({"error": "잘못된 Spotify 링크입니다."}), 400
 
-        # 3. 트랙 정보 저장 & 태그 생성
         headers = get_spotify_headers()
-        track_info = save_track_details(tid, cur, headers, []) # 여기서 태그도 저장됨!
+        track_info = save_track_details(tid, cur, headers, []) 
         
         if not track_info: return jsonify({"error": "트랙 정보를 찾을 수 없습니다."}), 404
 
-        # 4. 연결 테이블 갱신
+        # KOBIS 코드가 그대로 들어오므로 인코딩 불필요 (필요시 확인)
         cur.execute("DELETE FROM MOVIE_OSTS WHERE movie_id=:1", [mid])
         cur.execute("INSERT INTO MOVIE_OSTS (movie_id, track_id) VALUES (:1, :2)", [mid, tid])
-        
-        # 5. 로그 남기기
         cur.execute("INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, previous_value, new_value, user_id) VALUES ('MOVIE_OST', :1, 'UPDATE', 'NONE', :2, :3)", [mid, tid, uid])
         
         conn.commit()
@@ -151,7 +139,6 @@ def api_up_ost(mid):
         print(e)
         return jsonify({"error": "서버 오류 발생"}), 500
 
-# [NEW] 태그 추가
 @app.route('/api/track/<tid>/tags', methods=['POST'])
 def api_add_tags(tid):
     d = request.get_json(force=True)
@@ -165,7 +152,6 @@ def api_add_tags(tid):
             if not tag: continue
             if not tag.startswith('tag:'): tag = f"tag:{tag}"
             
-            # 확장
             targets = {tag}
             if skos_manager: targets.update(skos_manager.get_broader_tags(tag))
             
@@ -226,7 +212,6 @@ def api_user_update():
         conn.commit(); return jsonify({"message": "Updated"})
     except: return jsonify({"error": "Error"}), 500
 
-# (Spotify Token, Search 등 나머지 유지)
 @app.route('/api/spotify-token', methods=['GET'])
 def api_token(): return jsonify({"access_token": get_spotify_headers().get('Authorization', '').split(' ')[1]})
 
