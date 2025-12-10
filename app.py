@@ -271,27 +271,51 @@ def api_update_profile():
 
 @app.route('/api/track/<tid>/tags', methods=['POST'])
 def api_add_tags(tid):
-    d = request.json; new_tags = d.get('tags', []); uid = d.get('user_id')
-    if not new_tags: return jsonify({"error": "No tags"}), 400
+    d = request.json
+    new_tags = d.get('tags', [])
+    user_id = d.get('user_id')
+    
+    if not new_tags: return jsonify({"error": "태그가 없습니다."}), 400
+    
     try:
-        conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("SELECT role FROM USERS WHERE user_id=:1", [uid])
-        user = cur.fetchone()
-        if not user or user[0] != 'admin': return jsonify({"error": "관리자만 가능합니다."}), 403
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # 1. 유저 존재 여부만 확인 (관리자 여부 X)
+        cursor.execute("SELECT user_id FROM USERS WHERE user_id=:1", [user_id])
+        user = cursor.fetchone()
+        
+        if not user:
+             return jsonify({"error": "유효하지 않은 유저입니다. 다시 로그인해주세요."}), 401
             
+        # 2. 태그 저장 로직
+        added_count = 0
         for tag in new_tags:
             tag = tag.strip()
             if not tag: continue
             if not tag.startswith('tag:'): tag = f"tag:{tag}"
+            
+            # SKOS 확장
             tags_to_add = {tag}
-            if skos_manager: tags_to_add.update(skos_manager.get_broader_tags(tag))
+            if skos_manager:
+                tags_to_add.update(skos_manager.get_broader_tags(tag))
+            
             for t in tags_to_add:
-                try: cursor.execute("MERGE INTO TRACK_TAGS t USING (SELECT :1 AS tid, :2 AS tag FROM dual) s ON (t.track_id = s.tid AND t.tag_id = s.tag) WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.tid, s.tag)", [tid, t])
+                try:
+                    cursor.execute("""
+                        MERGE INTO TRACK_TAGS t 
+                        USING (SELECT :1 AS tid, :2 AS tag FROM dual) s 
+                        ON (t.track_id = s.tid AND t.tag_id = s.tag) 
+                        WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.tid, s.tag)
+                    """, [tid, t])
+                    added_count += 1
                 except: pass
+        
         conn.commit()
-        return jsonify({"message": "Saved"})
-    except Exception as e: return jsonify({"error": str(e)}), 500
-
+        return jsonify({"message": f"{added_count}개 태그가 저장되었습니다."})
+    except Exception as e:
+        print(f"[ERROR] 태그 저장 실패: {e}")
+        return jsonify({"error": str(e)}), 500
 @app.route('/api/track/<tid>/tags', methods=['GET'])
 def api_get_tags(tid):
     try:
