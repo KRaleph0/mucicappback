@@ -183,6 +183,75 @@ def get_track_detail_ttl(track_id):
         return make_response(ttl, 200, {'Content-Type': 'text/turtle; charset=utf-8'})
     except Exception as e: return str(e), 500
 
+# =========================================================
+# [신규] 박스오피스 TTL API
+# =========================================================
+@app.route('/api/data/box-office.ttl', methods=['GET'])
+def get_box_office_ttl():
+    """박스오피스 영화 및 OST 정보를 TTL 형식으로 반환"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # 1. 영화 정보 조회 (박스오피스 순위)
+        cursor.execute("""
+            SELECT movie_id, movie_title, poster_url, bo_rank 
+            FROM MOVIES 
+            WHERE bo_rank IS NOT NULL 
+            ORDER BY bo_rank ASC
+        """)
+        movies = cursor.fetchall()
+
+        # 2. OST 곡 정보 조회
+        cursor.execute("""
+            SELECT t.track_id, t.track_title, t.artist_name, t.image_url, 
+                   t.preview_url, m.movie_id
+            FROM TRACKS t
+            JOIN MOVIES m ON t.album_id = m.movie_id
+            WHERE m.bo_rank IS NOT NULL
+            ORDER BY m.bo_rank ASC, t.track_id ASC
+        """)
+        tracks = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        # 3. TTL 생성
+        ttl_parts = [
+            "@prefix schema: <http://schema.org/> .",
+            "@prefix komc: <https://knowledgemap.kr/komc/def/> .",
+            "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .",
+            "",
+            "# 박스오피스 영화 및 OST 데이터",
+            ""
+        ]
+
+        # 영화 정보 추가
+        for movie_id, title, poster, rank in movies:
+            ttl_parts.append(f"""<https://knowledgemap.kr/resource/movie/{movie_id}>
+    a schema:Movie ;
+    schema:name "{title}" ;
+    schema:image "{poster}" ;
+    komc:rank "{rank}"^^xsd:integer .""")
+
+        ttl_parts.append("")
+
+        # OST 곡 정보 추가
+        for track_id, title, artist, image, preview, movie_id in tracks:
+            ttl_parts.append(f"""<https://knowledgemap.kr/resource/track/{track_id}>
+    a schema:MusicRecording ;
+    schema:name "{title}" ;
+    schema:byArtist "{artist}" ;
+    schema:image "{image}" ;
+    schema:audio "{preview or ''}" ;
+    komc:featuredIn <https://knowledgemap.kr/resource/movie/{movie_id}> .""")
+
+        ttl_content = "\n".join(ttl_parts)
+        return make_response(ttl_content, 200, {'Content-Type': 'text/turtle; charset=utf-8'})
+
+    except Exception as e:
+        print(f"[BoxOffice Error] {e}")
+        return str(e), 500
+
 # ... (기존 proxy_search, uploaded_file 등 유지) ...
 
 if __name__ == '__main__':
