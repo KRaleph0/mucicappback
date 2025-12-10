@@ -26,4 +26,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 앱 복사
 COPY . .
 
-CMD ["flask", "--app", "backend_api", "run", "--host=0.0.0.0", "--port=5000"]
+CMD ["flask", "--app", "app", "run", "--host=0.0.0.0", "--port=5000"]
