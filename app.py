@@ -1,233 +1,246 @@
-# app.py
 import os
-import base64
-import uuid
-import requests
-from flask import Flask, request, jsonify, Response, send_from_directory
+import oracledb
+from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
-from werkzeug.security import generate_password_hash, check_password_hash
 
-# 분리된 모듈 import
-import config
-import database
-import utils
-import services
+# 모듈 import
+from config import UPLOAD_FOLDER
+from database import get_db_connection, close_db
+from services import update_box_office_data
+from utils import allowed_file, verify_turnstile  # verify_turnstile 추가됨
 
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = config.UPLOAD_FOLDER
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 # 파일 크기 제한 (16MB)
+
+# 업로드 폴더 자동 생성
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
 CORS(app)
 
-# DB 풀 초기화
-try:
-    database.init_db_pool()
-except:
-    pass
+# DB 연결 해제 핸들러 등록
+app.teardown_appcontext(close_db)
 
-@app.teardown_appcontext
-def shutdown_session(exception=None):
-    database.close_db()
-
-# --- 라우트 정의 ---
-
-@app.route('/api/recommend/context', methods=['GET'])
-def api_recommend_context():
-    try:
-        weather = utils.get_current_weather() or "Clear"
-        holiday = utils.get_today_holiday()
-        
-        target_tags = []
-        context_msg = ""
-
-        if holiday:
-            context_msg = f"🎉 오늘은 {holiday}입니다! 신나는 음악 어때요?"
-            target_tags = ['tag:Exciting', 'tag:Pop']
-        elif weather == "Rain":
-            context_msg = "☔ 비가 오네요. 감성적인 음악을 준비했어요."
-            target_tags = ['tag:Sentimental', 'tag:Rest']
-        elif weather == "Snow":
-            context_msg = "❄️ 눈이 내립니다. 로맨틱한 음악을 들어보세요."
-            target_tags = ['tag:Romance', 'tag:Sentimental']
-        else:
-            context_msg = "☀️ 맑은 날씨엔 드라이브 음악이죠!"
-            target_tags = ['tag:Exciting', 'tag:Pop']
-
-        conn = database.get_db_connection()
-        cursor = conn.cursor()
-        
-        bind_vars = {f't{i}': t for i, t in enumerate(target_tags)}
-        placeholders = ', '.join([f':t{i}' for i in range(len(target_tags))])
-        
-        query = f"""
-            SELECT t.track_title, t.artist_name, t.image_url, t.preview_url
-            FROM TRACKS t
-            JOIN TRACK_TAGS tt ON t.track_id = tt.track_id
-            WHERE tt.tag_id IN ({placeholders})
-            ORDER BY DBMS_RANDOM.VALUE
-            FETCH FIRST 6 ROWS ONLY
-        """
-        cursor.execute(query, bind_vars)
-        
-        tracks = []
-        for row in cursor.fetchall():
-            tracks.append({"title": row[0], "artist": row[1], "cover": row[2], "preview": row[3]})
-            
-        return jsonify({
-            "message": context_msg,
-            "weather": weather,
-            "holiday": holiday,
-            "tracks": tracks,
-            "tags": [t.replace('tag:', '') for t in target_tags]
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/user/profile-image', methods=['POST'])
-def upload_profile_image():
-    if 'file' not in request.files: return jsonify({"error": "No file"}), 400
-    file = request.files['file']
-    user_id = request.form.get('user_id')
-    if file and utils.allowed_file(file.filename) and user_id:
-        try:
-            ext = file.filename.rsplit('.', 1)[1].lower()
-            filename = secure_filename(f"{user_id}_{uuid.uuid4().hex[:8]}.{ext}")
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(filepath)
-            
-            image_url = f"/uploads/{filename}"
-            conn = database.get_db_connection(); cur = conn.cursor()
-            cur.execute("UPDATE USERS SET profile_img = :1 WHERE user_id = :2", [image_url, user_id])
-            conn.commit()
-            return jsonify({"message": "OK", "image_url": image_url})
-        except Exception as e: return jsonify({"error": str(e)}), 500
-    return jsonify({"error": "Invalid request"}), 400
-
-@app.route('/uploads/<name>')
-def download_file(name):
-    return send_from_directory(app.config["UPLOAD_FOLDER"], name)
+# =========================================================
+# 1. 인증 (Auth) API: 회원가입, 로그인
+# =========================================================
 
 @app.route('/api/auth/signup', methods=['POST'])
-def api_signup():
-    d = request.json; uid, pw, nick = d.get('id'), d.get('password'), d.get('nickname', 'User')
+def signup():
+    """회원가입 (캡차 검증 포함)"""
+    data = request.json
+    user_id = data.get('user_id')
+    password = data.get('password')
+    nickname = data.get('nickname')
+    token = data.get('turnstileToken')
+
+    # 1. 캡차 검증
+    is_valid, err_msg = verify_turnstile(token)
+    if not is_valid:
+        return jsonify({"error": err_msg}), 400
+
+    # 2. 필수 값 확인
+    if not all([user_id, password, nickname]):
+        return jsonify({"error": "모든 필드를 입력해주세요."}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
     try:
-        conn = database.get_db_connection(); cur = conn.cursor()
-        cur.execute("SELECT user_id FROM USERS WHERE user_id=:1", [uid])
-        if cur.fetchone(): return jsonify({"error": "ID exists"}), 409
-        cur.execute("INSERT INTO USERS (user_id, password, nickname, role) VALUES (:1, :2, :3, 'user')", [uid, generate_password_hash(pw), nick])
-        conn.commit(); return jsonify({"message": "Success"})
-    except Exception as e: return jsonify({"error": str(e)}), 500
+        # 3. 아이디 중복 확인
+        cursor.execute("SELECT user_id FROM USERS WHERE user_id = :1", [user_id])
+        if cursor.fetchone():
+            return jsonify({"error": "이미 존재하는 아이디입니다."}), 409
+
+        # 4. 회원 정보 저장
+        cursor.execute(
+            "INSERT INTO USERS (user_id, password, nickname, profile_img) VALUES (:1, :2, :3, :4)",
+            [user_id, password, nickname, None] 
+        )
+        conn.commit()
+        return jsonify({"message": "회원가입 성공"}), 201
+
+    except Exception as e:
+        conn.rollback()
+        print(f"[Signup Error] {e}")
+        return jsonify({"error": "회원가입 처리 중 오류 발생"}), 500
+
 
 @app.route('/api/auth/login', methods=['POST'])
-def api_login():
-    d = request.json; uid, pw = d.get('id'), d.get('password')
-    try:
-        conn = database.get_db_connection(); cur = conn.cursor()
-        cur.execute("SELECT user_id, password, nickname, profile_img, role FROM USERS WHERE user_id=:1", [uid])
-        u = cur.fetchone()
-        if u and check_password_hash(u[1], pw): return jsonify({"message": "Login success", "user": {"id": u[0], "nickname": u[2], "profile_img": u[3], "role": u[4]}})
-        return jsonify({"error": "Invalid"}), 401
-    except Exception as e: return jsonify({"error": str(e)}), 500
+def login():
+    """로그인 (캡차 검증 포함)"""
+    data = request.json
+    user_id = data.get('user_id')
+    password = data.get('password')
+    token = data.get('turnstileToken')
 
-@app.route('/api/admin/logs', methods=['POST'])
-def api_logs():
-    d = request.json; uid = d.get('user_id')
-    try:
-        conn = database.get_db_connection(); cur = conn.cursor()
-        cur.execute("SELECT role FROM USERS WHERE user_id=:1", [uid])
-        res = cur.fetchone()
-        if not res or res[0] != 'admin': return jsonify({"error": "No permission"}), 403
-        cur.execute("SELECT target_id, previous_value, new_value, user_id, created_at, user_ip FROM MODIFICATION_LOGS ORDER BY created_at DESC FETCH FIRST 50 ROWS ONLY")
-        logs = [{"movie":r[0], "old":r[1], "new":r[2], "user":r[3], "date":r[4].strftime("%Y-%m-%d %H:%M"), "ip":r[5]} for r in cur.fetchall()]
-        return jsonify(logs)
-    except Exception as e: return jsonify({"error": str(e)}), 500
+    # 1. 캡차 검증
+    is_valid, err_msg = verify_turnstile(token)
+    if not is_valid:
+        return jsonify({"error": err_msg}), 400
 
-@app.route('/api/movie/<mid>/update-ost', methods=['POST'])
-def api_up_ost(mid):
-    d = request.json; link = d.get('spotifyUrl'); uid = d.get('user_id', 'Guest'); ip = request.remote_addr
-    if not link: return jsonify({"error": "Link required"}), 400
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
     try:
-        conn = database.get_db_connection(); cur = conn.cursor(); headers = utils.get_spotify_headers()
-        real_mid = mid
+        # 2. 사용자 확인
+        cursor.execute(
+            "SELECT nickname, profile_img FROM USERS WHERE user_id = :1 AND password = :2",
+            [user_id, password]
+        )
+        row = cursor.fetchone()
+
+        if row:
+            return jsonify({
+                "message": "로그인 성공",
+                "user": {
+                    "user_id": user_id,
+                    "nickname": row[0],
+                    "profile_img": row[1]
+                }
+            }), 200
+        else:
+            return jsonify({"error": "아이디 또는 비밀번호가 잘못되었습니다."}), 401
+
+    except Exception as e:
+        print(f"[Login Error] {e}")
+        return jsonify({"error": "로그인 처리 중 오류 발생"}), 500
+
+
+# =========================================================
+# 2. 사용자 (User) API: 프로필, 비밀번호 변경
+# =========================================================
+
+@app.route('/api/user/profile', methods=['GET', 'POST'])
+def handle_profile():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # [GET] 프로필 조회
+    if request.method == 'GET':
+        user_id = request.args.get('user_id')
+        if not user_id: return jsonify({"error": "User ID required"}), 400
+        
         try:
-            if mid.endswith('_ost'): mid = mid[:-4]
-            pad = len(mid)%4; 
-            if pad: mid += '='*(4-pad)
-            dec = base64.urlsafe_b64decode(mid).decode('utf-8')
-            cur.execute("SELECT count(*) FROM MOVIES WHERE movie_id=:1", [dec])
-            if cur.fetchone()[0]>0: real_mid = dec
-        except: pass
-        tid = utils.extract_spotify_id(link)
-        if not tid: return jsonify({"error": "Invalid Link"}), 400
-        res = services.save_track_details(tid, cur, headers, [])
-        if not res: return jsonify({"error": "Track not found"}), 404
-        cur.execute("SELECT track_id FROM MOVIE_OSTS WHERE movie_id=:1", [real_mid])
-        prev = cur.fetchone(); prev_id = prev[0] if prev else "NONE"
-        cur.execute("DELETE FROM MOVIE_OSTS WHERE movie_id=:1", [real_mid])
-        cur.execute("INSERT INTO MOVIE_OSTS (movie_id, track_id) VALUES (:1, :2)", [real_mid, tid])
-        cur.execute("INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, previous_value, new_value, user_ip, user_id) VALUES ('MOVIE_OST', :1, 'UPDATE', :2, :3, :4, :5)", [real_mid, prev_id, tid, ip, uid])
+            cursor.execute("SELECT nickname, profile_img FROM USERS WHERE user_id = :1", [user_id])
+            row = cursor.fetchone()
+            if row:
+                return jsonify({"nickname": row[0], "profile_img": row[1]})
+            else:
+                return jsonify({"error": "User not found"}), 404
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    # [POST] 프로필 수정 (닉네임, 이미지)
+    if request.method == 'POST':
+        try:
+            user_id = request.form.get('user_id')
+            nickname = request.form.get('nickname')
+            file = request.files.get('profileImage')
+
+            # 1. 닉네임 업데이트
+            if nickname:
+                cursor.execute("UPDATE USERS SET nickname = :1 WHERE user_id = :2", [nickname, user_id])
+
+            # 2. 이미지 업로드
+            web_path = None
+            if file and allowed_file(file.filename):
+                filename = secure_filename(file.filename)
+                file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                file.save(file_path)
+                
+                web_path = f"/uploads/{filename}"
+                cursor.execute("UPDATE USERS SET profile_img = :1 WHERE user_id = :2", [web_path, user_id])
+
+            conn.commit()
+            
+            # 변경된 최신 이미지 경로 반환
+            return jsonify({
+                "message": "프로필 저장 완료", 
+                "image_url": web_path
+            })
+
+        except Exception as e:
+            conn.rollback()
+            print(f"[Profile POST Error] {e}")
+            return jsonify({"error": "저장 중 오류 발생"}), 500
+
+
+@app.route('/api/user/password', methods=['POST'])
+def update_password():
+    """비밀번호 변경 (캡차 검증 포함)"""
+    data = request.json
+    user_id = data.get('user_id')
+    current_pw = data.get('currentPassword')
+    new_pw = data.get('newPassword')
+    token = data.get('turnstileToken')
+
+    # 1. 캡차 검증
+    is_valid, err_msg = verify_turnstile(token)
+    if not is_valid:
+        return jsonify({"error": err_msg}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # 2. 현재 비밀번호 확인
+        cursor.execute("SELECT password FROM USERS WHERE user_id = :1", [user_id])
+        row = cursor.fetchone()
+        
+        if not row or row[0] != current_pw:
+            return jsonify({"error": "현재 비밀번호가 일치하지 않습니다."}), 400
+
+        # 3. 새 비밀번호 변경
+        cursor.execute("UPDATE USERS SET password = :1 WHERE user_id = :2", [new_pw, user_id])
         conn.commit()
-        return jsonify({"message": "Updated", "new_track": res['name']})
-    except Exception as e: return jsonify({"error": str(e)}), 500
+        
+        return jsonify({"message": "비밀번호가 변경되었습니다."})
+
+    except Exception as e:
+        conn.rollback()
+        print(f"[Password Change Error] {e}")
+        return jsonify({"error": "비밀번호 변경 중 오류 발생"}), 500
+
+
+# =========================================================
+# 3. 기존 관리자 및 추천 기능
+# =========================================================
 
 @app.route('/api/admin/update-movies', methods=['POST'])
-def api_adm_update(): return jsonify({"message": services.update_box_office_data()})
-
-@app.route('/api/data/box-office.ttl', methods=['GET'])
-def get_ttl():
+def api_update_movies():
+    """(관리자용) 박스오피스 강제 업데이트"""
     try:
-        conn = database.get_db_connection(); cur = conn.cursor()
-        cur.execute("""SELECT m.movie_id, m.title, m.rank, m.poster_url, t.track_id, t.track_title, t.artist_name, t.preview_url, a.album_cover_url FROM MOVIES m LEFT JOIN MOVIE_OSTS mo ON m.movie_id=mo.movie_id LEFT JOIN TRACKS t ON mo.track_id=t.track_id LEFT JOIN ALBUMS a ON t.album_id=a.album_id WHERE m.rank<=10 ORDER BY m.rank ASC""")
-        rows = cur.fetchall()
-        ttl = "@prefix schema: <http://schema.org/> .\n@prefix komc: <https://knowledgemap.kr/komc/def/> .\n@prefix tag: <https://knowledgemap.kr/komc/def/tag/> .\n"
-        tcur = conn.cursor()
-        for r in rows:
-            mid, mt, rk, mp, tid, tt, ar, pr, cov = r
-            m_uri = base64.urlsafe_b64encode(mid.encode()).decode().rstrip("=")
-            mp = mp or "img/playlist-placeholder.png"; cov = cov or "img/playlist-placeholder.png"; tt = tt or "OST 정보 없음"; ar = ar or "-"
-            tags = ""
-            if tid:
-                tcur.execute("SELECT tag_id FROM TRACK_TAGS WHERE track_id=:1", [tid])
-                tl = [x[0].replace('tag:', '') for x in tcur.fetchall()]
-                if tl: tags = f"    komc:relatedTag tag:{', tag:'.join(tl)} ;"
-            t_uri = tid if tid else f"{m_uri}_ost"
-            ttl += f"""<https://knowledgemap.kr/komc/resource/movie/{m_uri}> a schema:Movie ; schema:name "{mt}" ; schema:image "{mp}" ; komc:rank {rk} .\n<https://knowledgemap.kr/komc/resource/track/{t_uri}> a schema:MusicRecording ; schema:name "{tt}" ; schema:byArtist "{ar}" ; schema:image "{cov}" ; schema:audio "{pr or ''}" ; komc:featuredIn <https://knowledgemap.kr/komc/resource/movie/{m_uri}> ;\n{tags}\n    schema:genre "Movie Soundtrack" .\n"""
-        return Response(ttl, mimetype='text/turtle')
-    except Exception as e: return f"# Error: {e}", 500
-
-@app.route('/api/spotify-token', methods=['GET'])
-def api_tk():
-    try:
-        return jsonify(utils.get_spotify_headers())
+        msg = update_box_office_data()
+        return jsonify({"message": msg})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/search', methods=['GET'])
-def api_src():
-    query = request.args.get('q')
-    search_type = request.args.get('type', 'track')
-    limit = request.args.get('limit', '20')
-    if not query: return jsonify({"error": "No query"}), 400
-    try:
-        headers = utils.get_spotify_headers()
-        res = requests.get(f"{config.SPOTIFY_API_BASE}/search", headers=headers, 
-                           params={"q": query, "type": search_type, "limit": limit, "market": "KR"})
-        return jsonify(res.json())
-    except Exception as e: return jsonify({"error": str(e)}), 500
+@app.route('/api/recommend/weather', methods=['GET'])
+def api_recommend_weather():
+    condition = request.args.get('condition', 'Clear')
+    tag_map = {'Clear': 'tag:Clear', 'Rain': 'tag:Rain', 'Snow': 'tag:Snow', 'Clouds': 'tag:Cloudy'}
+    target_tag = tag_map.get(condition, 'tag:Clear')
 
-@app.route('/api/track/<tid>', methods=['GET'])
-def api_tr(tid):
-    try:
-        conn = database.get_db_connection()
-        cursor = conn.cursor()
-        headers = utils.get_spotify_headers()
-        res = services.save_track_details(tid, cursor, headers)
-        if res:
-            cursor.execute("UPDATE TRACKS SET views = views + 1 WHERE track_id = :1", [tid])
-            conn.commit()
-            return jsonify(res)
-        return jsonify({"error": "Failed"}), 404
-    except Exception as e: return jsonify({"error": str(e)}), 500
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT t.track_title, t.preview_url, a.album_cover_url, m.title as movie_title
+        FROM TRACKS t
+        JOIN TRACK_TAGS tt ON t.track_id = tt.track_id
+        JOIN ALBUMS a ON t.album_id = a.album_id
+        LEFT JOIN MOVIE_OSTS mo ON t.track_id = mo.track_id
+        LEFT JOIN MOVIES m ON mo.movie_id = m.movie_id
+        WHERE tt.tag_id = :1
+    """, [target_tag])
+    
+    results = []
+    for row in cursor.fetchall():
+        results.append({
+            "title": row[0], "preview": row[1], "cover": row[2], "movie": row[3]
+        })
+    return jsonify(results)
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)

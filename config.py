@@ -7,6 +7,7 @@ SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 KOBIS_API_KEY = os.getenv("KOBIS_API_KEY")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 DATA_GO_KR_API_KEY = os.getenv("DATA_GO_KR_API_KEY")
+CLOUDFLARE_SECRET_KEY =os.getenv("CLOUDFLARE_SECRET_KEY")
 
 # --- 2. URLs ---
 SPOTIFY_AUTH_URL = "https://accounts.spotify.com/api/token"

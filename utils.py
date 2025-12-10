@@ -5,6 +5,7 @@ import requests
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 import config
+from config import CLOUDFLARE_SECRET_KEY
 
 # --- 텍스트 처리 ---
 def clean_text(text):
@@ -31,6 +32,31 @@ def extract_spotify_id(url):
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in config.ALLOWED_EXTENSIONS
+
+def verify_turnstile(token):
+    """
+    Cloudflare Turnstile 토큰을 검증합니다.
+    Returns: (성공여부 Bool, 에러메시지 String)
+    """
+    if not token:
+        return False, "캡차 토큰이 없습니다."
+    
+    verify_url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+    verify_data = {
+        "secret": CLOUDFLARE_SECRET_KEY,
+        "response": token
+    }
+    
+    try:
+        # Cloudflare 검증 API 호출
+        res = requests.post(verify_url, data=verify_data).json()
+        if res.get("success"):
+            return True, None
+        else:
+            return False, "캡차 인증에 실패했습니다."
+    except Exception as e:
+        print(f"[Turnstile Error] {e}")
+        return False, "보안 검증 중 오류가 발생했습니다."
 
 # --- 외부 API (Spotify 인증, 날씨, 공휴일, 영화정보 조회) ---
 def get_spotify_headers():
