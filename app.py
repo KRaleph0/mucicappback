@@ -293,8 +293,85 @@ def proxy_search():
 @app.route('/uploads/<path:filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+
 @app.route('/api/track/<track_id>.ttl', methods=['GET'])
 def get_track_detail_ttl(track_id):
+    """
+    특정 곡의 상세 정보를 조회하여 RDF(Turtle) 포맷으로 반환합니다.
+    - 조회수(komc:playCount) 포함
+    - 사용자 정의 태그 스키마(komc, schema) 준수
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # 1. 트랙 기본 정보 조회 (조회수 views 포함)
+        # 앨범 ID를 이용해 앨범 테이블 조인이 필요할 수 있으나, 여기선 tracks 테이블 위주로 조회
+        cursor.execute("""
+            SELECT t.track_title, t.artist_name, t.album_id, t.preview_url, t.image_url, 
+                   t.bpm, t.music_key, t.duration, t.views, a.album_title
+            FROM TRACKS t
+            LEFT JOIN ALBUMS a ON t.album_id = a.album_id
+            WHERE t.track_id = :1
+        """, [track_id])
+        
+        track_row = cursor.fetchone()
+
+        if not track_row:
+            return "Track not found in DB", 404
+
+        title, artist, album_id, preview, cover, bpm, key, duration, views, album_title = track_row
+        
+        # 앨범 제목이 없으면 기본값
+        if not album_title: album_title = "Unknown Album"
+
+        # 2. 태그 조회
+        cursor.execute("""
+            SELECT tag_id FROM TRACK_TAGS WHERE track_id = :1
+        """, [track_id])
+        tags = [row[0] for row in cursor.fetchall()]
+        
+        # 태그 리스트를 문자열로 변환 (예: tag:Pop, tag:Exciting)
+        tag_str = ", ".join(tags) if tags else "tag:Music"
+
+        # 3. TTL 생성 (요청하신 스키마 구조 반영)
+        # views는 xsd:integer 타입으로 명시
+        ttl_content = f"""@prefix schema: <http://schema.org/> .
+@prefix mo: <http://purl.org/ontology/mo/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix komc: <https://knowledgemap.kr/komc/def/> .
+@prefix tag: <https://knowledgemap.kr/komc/def/tag/> .
+
+###########################################################
+# Track Information for {track_id}
+###########################################################
+<https://knowledgemap.kr/resource/track/{track_id}>
+    a schema:MusicRecording ;
+    schema:name "{title}" ;
+    schema:byArtist "{artist}" ;
+    schema:inAlbum "{album_title}" ;
+    schema:duration "{duration}" ;
+    mo:bpm "{bpm}"^^xsd:integer ;
+    mo:key "{key}" ;
+    schema:image "{cover}" ;
+    schema:audio "{preview or ''}" ;
+    schema:identifier "{track_id}" ;
+    
+    # [핵심] 조회수 (View Count)
+    komc:playCount "{views}"^^xsd:integer ;
+    
+    # 관련 태그
+    komc:relatedTag {tag_str} .
+"""
+        response = make_response(ttl_content)
+        response.headers['Content-Type'] = 'text/turtle; charset=utf-8'
+        return response
+
+    except Exception as e:
+        print(f"[Track TTL Error] {e}")
+        return str(e), 500
     """
     특정 곡의 상세 정보를 조회하여 RDF(Turtle) 포맷으로 반환합니다.
     - 조회수(komc:playCount) 포함
@@ -371,6 +448,6 @@ def get_track_detail_ttl(track_id):
         print(f"[Track TTL Error] {e}")
         return str(e), 500
     
-    
+
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
