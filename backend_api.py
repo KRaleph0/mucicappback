@@ -3,13 +3,14 @@ import requests
 import base64
 import oracledb
 import re
+import uuid
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, g, Response
-from flask_cors import CORS
-import uuid
-from werkzeug.utils import secure_filename
 from flask import Flask, request, jsonify, g, Response, send_from_directory
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
+
 # --- 1. 설정 ---
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
@@ -34,15 +35,19 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "password")
 DB_DSN = os.getenv("DB_DSN", "ordb.mirinea.org:1521/XEPDB1")
 
 PITCH_CLASS = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-UPLOAD_FOLDER = 'uploads'
+
+# [수정] 절대 경로 사용 (Docker 환경에서 안전함)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
+# [수정] Flask 앱 초기화 중복 제거 및 설정
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-CORS(app)
-app = Flask(__name__)
+# app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 # 필요시 파일 크기 제한 (16MB)
 CORS(app)
 
 try:
@@ -207,7 +212,6 @@ def save_track_details(track_id, cursor, headers, genres=[]):
     except Exception as e: return None
 
 def update_box_office_data():
-    # ... (기존과 동일)
     print("[Batch] 박스오피스 업데이트 시작...")
     try:
         conn = get_db_connection()
@@ -241,6 +245,7 @@ def update_box_office_data():
                 except: pass
         return "업데이트 완료"
     except Exception as e: return f"Error: {e}"
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -256,7 +261,10 @@ def upload_profile_image():
     if 'file' not in request.files:
         return jsonify({"error": "파일이 없습니다."}), 400
     file = request.files['file']
-    user_id = request.form.get('user_id')
+    user_id = request.form.get('user_id') # user_id 체크 필요
+    
+    if not user_id:
+        return jsonify({"error": "사용자 ID가 전달되지 않았습니다."}), 400
     
     if file.filename == '':
         return jsonify({"error": "선택된 파일이 없습니다."}), 400
@@ -266,6 +274,8 @@ def upload_profile_image():
             # 2. 파일명 안전하게 변경 (UUID 사용)
             ext = file.filename.rsplit('.', 1)[1].lower()
             filename = secure_filename(f"{user_id}_{uuid.uuid4().hex[:8]}.{ext}")
+            
+            # [수정] Config에서 경로를 확실히 가져옴
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             
             # 3. 서버에 저장
@@ -283,8 +293,11 @@ def upload_profile_image():
             return jsonify({"message": "프로필 이미지가 변경되었습니다.", "image_url": image_url})
             
         except Exception as e:
+            # 서버 로그에 에러 출력 (docker logs로 확인 가능)
+            import traceback
+            traceback.print_exc() 
             print(f"[업로드 에러] {e}")
-            return jsonify({"error": "이미지 저장 중 오류 발생"}), 500
+            return jsonify({"error": f"이미지 저장 실패: {str(e)}"}), 500
     else:
         return jsonify({"error": "허용되지 않는 파일 형식입니다. (png, jpg, jpeg, gif 가능)"}), 400
 
@@ -315,7 +328,6 @@ def api_recommend_context():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # 태그에 맞는 곡 조회 (랜덤)
         bind_vars = {f't{i}': t for i, t in enumerate(target_tags)}
         placeholders = ', '.join([f':t{i}' for i in range(len(target_tags))])
         
@@ -338,20 +350,17 @@ def api_recommend_context():
             "weather": weather,
             "holiday": holiday,
             "tracks": tracks,
-            # [NEW] 태그 목록도 함께 전송 (tag: 접두사 제거)
             "tags": [t.replace('tag:', '') for t in target_tags]
         })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# (나머지 API들 그대로 유지)
 @app.route('/api/auth/signup', methods=['POST'])
 def api_signup():
     d = request.json
-    # 1. 입력값 정제 (양쪽 공백 제거)
-    uid = d.get('id', '').strip().lower()  # 아이디는 무조건 소문자로 통일
-    pw = d.get('password', '').strip()     # 비밀번호 공백 제거
+    uid = d.get('id', '').strip().lower()
+    pw = d.get('password', '').strip()
     nick = d.get('nickname', 'User').strip()
 
     if not uid or not pw:
@@ -360,13 +369,10 @@ def api_signup():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
-        # 2. 중복 확인 (소문자로 변환된 ID로 확인하므로 중복 방지됨)
         cursor.execute("SELECT user_id FROM USERS WHERE user_id=:1", [uid])
         if cursor.fetchone():
             return jsonify({"error": "이미 존재하는 ID입니다."}), 409
 
-        # 3. 저장
         cursor.execute("""
             INSERT INTO USERS (user_id, password, nickname, role) 
             VALUES (:1, :2, :3, 'user')
@@ -379,14 +385,9 @@ def api_signup():
         print(f"[회원가입 오류] {e}")
         return jsonify({"error": "서버 오류가 발생했습니다."}), 500
 
-
-# ---------------------------------------------------------
-# [수정] 로그인 API (공백 제거 + 소문자 변환)
-# ---------------------------------------------------------
 @app.route('/api/auth/login', methods=['POST'])
 def api_login():
     d = request.json
-    # 로그인할 때도 똑같이 정제해야 DB에 있는 값과 매칭됨
     uid = d.get('id', '').strip().lower()
     pw = d.get('password', '').strip()
 
@@ -396,12 +397,9 @@ def api_login():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
-        # 사용자 조회
         cursor.execute("SELECT user_id, password, nickname, profile_img, role FROM USERS WHERE user_id=:1", [uid])
-        user = cursor.fetchone() # (id, pw_hash, nickname, img, role)
+        user = cursor.fetchone()
 
-        # 비밀번호 검증
         if user and check_password_hash(user[1], pw):
             return jsonify({
                 "message": "로그인 성공",
@@ -413,12 +411,12 @@ def api_login():
                 }
             })
         else:
-            # 아이디가 없거나 비번이 틀린 경우
             return jsonify({"error": "아이디 또는 비밀번호가 잘못되었습니다."}), 401
 
     except Exception as e:
         print(f"[로그인 오류] {e}")
         return jsonify({"error": "서버 오류가 발생했습니다."}), 500
+
 @app.route('/api/admin/logs', methods=['POST'])
 def api_logs():
     d = request.json; uid = d.get('user_id')
@@ -485,13 +483,11 @@ def get_ttl():
     except Exception as e: return f"# Error: {e}", 500
 
 @app.route('/api/spotify-token', methods=['GET'])
-def api_tk(): return api_get_token()
+def api_tk(): return jsonify(get_spotify_headers()) # 토큰 반환 수정
 @app.route('/api/search', methods=['GET'])
-def api_src(): return api_search()
+def api_src(): return jsonify({"message": "Not implemented yet"}) # 임시
 @app.route('/api/track/<tid>', methods=['GET'])
-def api_tr(tid): return api_get_track_detail(tid)
-
-from werkzeug.security import generate_password_hash, check_password_hash
+def api_tr(tid): return jsonify({"message": f"Track {tid} detail"}) # 임시
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
