@@ -82,6 +82,161 @@ def save_track_details(track_id, cursor, headers, genres=[]):
 
 def update_box_office_data():
     print("[Batch] 박스오피스 업데이트 시작...")
+    conn = None
+    cursor = None
+
+    try:
+        conn = database.get_db_connection()
+        cursor = conn.cursor()
+        headers = utils.get_spotify_headers()
+
+        # 어제 날짜 (일별 박스오피스)
+        target_dt = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+
+        res = requests.get(
+            config.KOBIS_BOXOFFICE_URL,
+            params={
+                "key": config.KOBIS_API_KEY,
+                "targetDt": target_dt,
+                "itemPerPage": "10"
+            },
+            timeout=5
+        ).json()
+
+        movie_list = res.get("boxOfficeResult", {}).get("dailyBoxOfficeList", [])
+        if not movie_list:
+            msg = "KOBIS 데이터 없음 (API 키 또는 날짜 확인 필요)"
+            print("[Batch] " + msg)
+            return msg
+
+        matched_count = 0
+
+        for movie in movie_list:
+            rank = int(movie["rank"])
+            title = movie["movieNm"]
+            movie_id = movie["movieCd"]   # ★ movie_id는 코드로 통일
+            print(f"Processing [{rank}위]: {title} ({movie_id})")
+
+            # ------------------------------------------------
+            # 1) MOVIES 테이블 upsert
+            # ------------------------------------------------
+            try:
+                cursor.execute(
+                    """
+                    MERGE INTO MOVIES m
+                    USING (SELECT :movie_id AS movie_id FROM dual) d
+                    ON (m.movie_id = d.movie_id)
+                    WHEN MATCHED THEN
+                      UPDATE SET
+                        title = :title,
+                        rank  = :rank
+                    WHEN NOT MATCHED THEN
+                      INSERT (movie_id, title, rank)
+                      VALUES (:movie_id, :title, :rank)
+                    """,
+                    {
+                        "movie_id": movie_id,
+                        "title": title,
+                        "rank": rank
+                    }
+                )
+                conn.commit()
+            except Exception as e:
+                print(f"[Movie DB Error] movie_id={movie_id}, title={title}, rank={rank} -> {e}")
+
+            # ------------------------------------------------
+            # 2) KOBIS 메타데이터(장르, 영문제목 등) 가져오기
+            # ------------------------------------------------
+            try:
+                genres, title_en, title_og = utils.get_kobis_metadata(title)
+            except Exception as e:
+                print(f"[KOBIS Metadata Error] title={title} -> {e}")
+                genres, title_en, title_og = [], None, None
+
+            # ------------------------------------------------
+            # 3) OST 매칭 (Spotify 검색)
+            # ------------------------------------------------
+            # 우선순위: 원제/영문제목 > 한글제목
+            query_candidates = [title_og, title_en, title]
+            # None/빈 값 제거
+            query_candidates = [q for q in query_candidates if q]
+
+            matched_track = None
+            try:
+                matched_track = find_best_track(query_candidates, headers)
+            except Exception as e:
+                print(f"[Spotify Match Error] title={title} -> {e}")
+
+            if not matched_track:
+                print(f"   -> No suitable match found.")
+                continue
+
+            tid = matched_track["id"]
+            print(f"   -> Match Found! {matched_track.get('name')} (id={tid})")
+
+            # ------------------------------------------------
+            # 4) TRACKS / TRACK_TAGS 등 세부 정보 저장
+            # ------------------------------------------------
+            try:
+                # 내부에서 TRACKS, TRACK_TAGS 등을 저장하는 함수라고 가정
+                save_track_details(tid, cursor, headers, genres)
+            except Exception as e:
+                print(f"[Save Track Error] track_id={tid}, movie_id={movie_id} -> {e}")
+
+            # ------------------------------------------------
+            # 5) MOVIE_OSTS 연결 테이블 (movie_id ↔ track_id)
+            #    ★ 여기에서 바인딩 개수 꼬이지 않게 깔끔히 정리
+            # ------------------------------------------------
+            try:
+                # 기존 매핑 삭제
+                cursor.execute(
+                    "DELETE FROM MOVIE_OSTS WHERE movie_id = :movie_id",
+                    {"movie_id": movie_id}
+                )
+
+                # 새 매핑 추가 (필요시 MERGE로 변경 가능)
+                cursor.execute(
+                    """
+                    INSERT INTO MOVIE_OSTS (movie_id, track_id)
+                    VALUES (:movie_id, :track_id)
+                    """,
+                    {
+                        "movie_id": movie_id,
+                        "track_id": tid
+                    }
+                )
+
+                conn.commit()
+                matched_count += 1
+
+            except Exception as e:
+                # 여기에서 이전에 보이던 DPY-4009(바인딩 개수 문제)가 날 수 있음
+                print(
+                    f"[MOVIE_OSTS Save Error] movie_id={movie_id}, track_id={tid} -> {e}"
+                )
+
+        msg = f"업데이트 완료 ({matched_count}/10건 매칭)"
+        print("[Batch] " + msg)
+        return msg
+
+    except Exception as e:
+        print(f"[Batch Critical Error] {e}")
+        return f"Error: {e}"
+
+    finally:
+        # 여기서는 connection을 굳이 닫지 않아도 되지만,
+        # get_db_connection()이 g에 저장하지 않고 직접 새 conn을 열어주는 구조라면 닫아주는 게 안전함.
+        try:
+            if cursor is not None:
+                cursor.close()
+        except Exception as e:
+            print(f"[Batch Cursor Close Error] {e}")
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception as e:
+            print(f"[Batch Conn Close Error] {e}")
+    print("[Batch] 박스오피스 업데이트 시작...")
     try:
         conn = database.get_db_connection()
         cursor = conn.cursor()

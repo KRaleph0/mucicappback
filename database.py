@@ -26,7 +26,15 @@ def get_db_connection():
     if 'db' not in g: g.db = db_pool.acquire()
     return g.db
 
-def close_db(e=None):
-    """요청 종료 시 커넥션 반납"""
+def close_db(exception=None):
     db = g.pop('db', None)
-    if db: db.close()
+    if db is not None:
+        try:
+            db.close()
+        except oracledb.exceptions.InterfaceError as e:
+            # 이미 끊어진 연결(DPY-1001)은 그냥 무시
+            # 다른 에러 코드면 필요시 로깅 정도만
+            print(f"[DB Close Warning] {e}")
+        except Exception as e:
+            # teardown에서 여기서 또 예외 터지면 응답이 500으로 날아가니 그냥 로그만 남기고 무시
+            print(f"[DB Close Error] {e}")

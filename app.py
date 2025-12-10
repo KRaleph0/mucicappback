@@ -216,7 +216,6 @@ def get_context_recommendation():
             FROM TRACKS t
             JOIN TRACK_TAGS tt ON t.track_id = tt.track_id
             WHERE tt.tag_uri = :tag_uri
-            ORDER BY t.popularity DESC
             FETCH FIRST 10 ROWS ONLY
         """, {"tag_uri": target_tag})
         rows = cursor.fetchall()
