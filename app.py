@@ -13,9 +13,9 @@ from werkzeug.security import generate_password_hash, check_password_hash
 try:
     from skos_manager import SkosManager
     skos_manager = SkosManager("skos-definition.ttl")
-    print("✅ SKOS Manager 로드 성공")
+    print("✅ [INIT] SKOS Manager 로드 성공")
 except:
-    print("⚠️ SKOS Manager 없음 (태그 확장 비활성화)")
+    print("⚠️ [INIT] SKOS Manager 없음 (태그 확장 비활성화)")
     skos_manager = None
 
 # --- 1. 설정 ---
@@ -124,7 +124,7 @@ def get_today_holiday():
         return None
     except: return None
 
-# --- 4. 검색/저장 로직 ---
+# --- 4. KOBIS/Spotify 검색 ---
 def get_kobis_metadata(movie_name):
     try:
         res = requests.get(KOBIS_MOVIE_LIST_URL, params={'key': KOBIS_API_KEY, 'movieNm': movie_name}).json()
@@ -141,11 +141,16 @@ def find_best_track(titles, headers):
         except: pass
     return None
 
+# --- [핵심 디버깅] 5. 트랙 및 태그 저장 ---
 def save_track_details(track_id, cursor, headers, genres=[]):
     if not track_id: return None
+    print(f"\n[DEBUG] 트랙 저장 시작: {track_id}")  # 로그
+    
     try:
         t_res = requests.get(f"{SPOTIFY_API_BASE}/tracks/{track_id}", headers=headers)
-        if t_res.status_code != 200: return None
+        if t_res.status_code != 200: 
+            print(f"[ERROR] Spotify API 응답 오류: {t_res.status_code}")
+            return None
         t_data = t_res.json()
         a_res = requests.get(f"{SPOTIFY_API_BASE}/audio-features/{track_id}", headers=headers)
         a_data = a_res.json() if a_res.status_code == 200 else {}
@@ -158,16 +163,21 @@ def save_track_details(track_id, cursor, headers, genres=[]):
         bpm = a_data.get('tempo', 0); k_int = a_data.get('key', -1); dur = ms_to_iso_duration(t_data.get('duration_ms', 0))
         mkey = PITCH_CLASS[k_int] if 0 <= k_int < 12 else 'Unknown'
 
+        # 앨범 저장
         if aid:
             cursor.execute("MERGE INTO ALBUMS USING dual ON (album_id=:1) WHEN NOT MATCHED THEN INSERT (album_id, album_cover_url) VALUES (:1, :2)", [aid, img])
         
+        # 트랙 저장
+        print(f"[DEBUG] TRACKS 테이블 저장 시도...")
         cursor.execute("""
             MERGE INTO TRACKS t USING dual ON (t.track_id=:tid)
             WHEN MATCHED THEN UPDATE SET t.bpm=:bpm, t.music_key=:mkey, t.duration=:dur, t.image_url=:img
             WHEN NOT MATCHED THEN INSERT (track_id, track_title, artist_name, album_id, preview_url, image_url, bpm, music_key, duration)
             VALUES (:tid, :title, :artist, :aid, :prev, :img, :bpm, :mkey, :dur)
         """, {'tid':track_id, 'title':title, 'artist':artist, 'aid':aid, 'prev':prev, 'img':img, 'bpm':bpm, 'mkey':mkey, 'dur':dur})
+        print(f"[DEBUG] TRACKS 저장 성공")
 
+        # 태그 생성 로직
         tags = set(["tag:Spotify"])
         if genres: tags.add("tag:MovieOST")
         e = a_data.get('energy', 0); v = a_data.get('valence', 0)
@@ -185,13 +195,27 @@ def save_track_details(track_id, cursor, headers, genres=[]):
         if skos_manager:
             for t in tags: final_tags.update(skos_manager.get_broader_tags(t))
 
+        # 태그 저장 (상세 로그)
+        print(f"[DEBUG] 저장할 태그 목록: {final_tags}")
+        count = 0
         for t in final_tags:
-            try: cursor.execute("MERGE INTO TRACK_TAGS t USING (SELECT :1 AS tid, :2 AS tag FROM dual) s ON (t.track_id = s.tid AND t.tag_id = s.tag) WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.tid, s.tag)", [track_id, t])
-            except: pass
+            try:
+                cursor.execute("""
+                    MERGE INTO TRACK_TAGS t USING (SELECT :1 AS tid, :2 AS tag FROM dual) s 
+                    ON (t.track_id = s.tid AND t.tag_id = s.tag) 
+                    WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.tid, s.tag)
+                """, [track_id, t])
+                count += 1
+            except Exception as e:
+                print(f"[ERROR] 태그 '{t}' 저장 실패: {e}")
+        
+        print(f"[DEBUG] 태그 {count}개 저장 완료")
         
         cursor.connection.commit()
         return t_data
-    except: return None
+    except Exception as e:
+        print(f"[CRITICAL ERROR] save_track_details 실패: {e}")
+        return None
 
 def update_box_office_data():
     print("[Batch] 업데이트 시작...")
@@ -224,49 +248,60 @@ def update_box_office_data():
 
 # --- API 라우트 ---
 
-# [NEW] 태그 저장 API (권한 체크 포함)
+# [핵심 디버깅] 태그 추가 API
 @app.route('/api/track/<tid>/tags', methods=['POST'])
 def api_add_tags(tid):
+    print(f"\n[API DEBUG] 태그 추가 요청 - Track ID: {tid}") # 로그
     data = request.json
     new_tags = data.get('tags', [])
     user_id = data.get('user_id')
     
-    if not new_tags: return jsonify({"error": "태그가 없습니다."}), 400
+    print(f"[API DEBUG] 요청 데이터: {data}")
+
+    if not new_tags: return jsonify({"error": "태그 없음"}), 400
     
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # 권한 확인 (관리자만 가능하게 하려면 아래 주석 해제)
+        # 권한 체크
         cursor.execute("SELECT role FROM USERS WHERE user_id=:1", [user_id])
         user = cursor.fetchone()
         if not user or user[0] != 'admin':
-             return jsonify({"error": "관리자만 태그를 추가할 수 있습니다."}), 403
+             print(f"[API WARN] 권한 없음 (User: {user_id})")
+             return jsonify({"error": "관리자 권한 필요"}), 403
             
         added_count = 0
         for tag in new_tags:
             tag = tag.strip()
             if not tag: continue
-            # 'tag:' 접두사 자동 추가
             if not tag.startswith('tag:'): tag = f"tag:{tag}"
             
-            # SKOS 확장
             tags_to_add = {tag}
             if skos_manager:
                 tags_to_add.update(skos_manager.get_broader_tags(tag))
             
+            print(f"[API DEBUG] 확장된 태그: {tags_to_add}")
+
             for t in tags_to_add:
                 try:
-                    cursor.execute("MERGE INTO TRACK_TAGS t USING (SELECT :1 AS tid, :2 AS tag FROM dual) s ON (t.track_id = s.tid AND t.tag_id = s.tag) WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.tid, s.tag)", [tid, t])
+                    # 명시적 INSERT 시도 (MERGE 대신)
+                    cursor.execute("""
+                        MERGE INTO TRACK_TAGS t USING (SELECT :1 AS tid, :2 AS tag FROM dual) s 
+                        ON (t.track_id = s.tid AND t.tag_id = s.tag) 
+                        WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.tid, s.tag)
+                    """, [tid, t])
                     added_count += 1
-                except: pass
+                except Exception as db_err:
+                     print(f"[API ERROR] 태그 DB 저장 실패 ({t}): {db_err}")
         
         conn.commit()
+        print(f"[API SUCCESS] 총 {added_count}개 태그 저장됨")
         return jsonify({"message": f"{added_count}개 태그 저장 완료"})
     except Exception as e:
+        print(f"[API CRITICAL] 태그 추가 API 에러: {e}")
         return jsonify({"error": str(e)}), 500
 
-# [NEW] 태그 조회 API (팝업 표시용)
 @app.route('/api/track/<tid>/tags', methods=['GET'])
 def api_get_tags(tid):
     try:
@@ -371,161 +406,6 @@ def api_adm_update(): return jsonify({"message": update_box_office_data()})
 
 @app.route('/api/data/box-office.ttl', methods=['GET'])
 def get_ttl():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # 1. DB에서 영화 목록 조회 (랭킹 순)
-        cursor.execute("""
-            SELECT m.movie_id, m.title, m.rank, m.poster_url, 
-                   t.track_id, t.track_title, t.artist_name, t.preview_url, a.album_cover_url
-            FROM MOVIES m
-            LEFT JOIN MOVIE_OSTS mo ON m.movie_id = mo.movie_id
-            LEFT JOIN TRACKS t ON mo.track_id = t.track_id
-            LEFT JOIN ALBUMS a ON t.album_id = a.album_id
-            WHERE m.rank <= 10 
-            ORDER BY m.rank ASC
-        """)
-        rows = cursor.fetchall()
-        
-        ttl = """@prefix schema: <http://schema.org/> .
-@prefix komc: <https://knowledgemap.kr/komc/def/> .
-@prefix tag: <https://knowledgemap.kr/komc/def/tag/> .
-"""
-        # 2. 중복 방지용 Set (이미 처리한 영화 제목 저장)
-        processed_titles = set()
-
-        for row in rows:
-            mid, mtitle, rank, mposter, tid, ttitle, artist, preview, cover = row
-            
-            # [핵심] 이미 처리한 영화 제목이면 건너뜀 (중복 방지)
-            if mtitle in processed_titles:
-                continue
-            
-            processed_titles.add(mtitle)
-
-            # 3. 데이터 정제
-            m_uri = base64.urlsafe_b64encode(mid.encode()).decode().rstrip("=")
-            mposter = mposter or "img/playlist-placeholder.png"
-            
-            # 트랙 정보가 없으면 기본값 설정
-            # (tid가 있으면 tid 사용, 없으면 영화기반 임시 ID)
-            t_uri = tid if tid else f"{m_uri}_ost"
-            ttitle = ttitle or f"{mtitle} (OST 정보 없음)"
-            artist = artist or "Unknown Artist"
-            cover = cover or mposter # 앨범 커버 없으면 영화 포스터 사용
-            preview = preview or ""
-
-            # 4. 태그 조회 (트랙이 있는 경우만)
-            tags_str = ""
-            if tid:
-                try:
-                    tag_cursor = conn.cursor()
-                    tag_cursor.execute("SELECT tag_id FROM TRACK_TAGS WHERE track_id=:1", [tid])
-                    tags = [r[0].replace('tag:', '') for r in tag_cursor.fetchall()]
-                    if tags:
-                        tags_str = f"    komc:relatedTag tag:{', tag:'.join(tags)} ;"
-                except: pass
-
-            # 5. TTL 생성
-            ttl += f"""
-<https://knowledgemap.kr/komc/resource/movie/{m_uri}> a schema:Movie ;
-    schema:name "{mtitle}" ;
-    schema:image "{mposter}" ;
-    komc:rank {rank} .
-
-<https://knowledgemap.kr/komc/resource/track/{t_uri}> a schema:MusicRecording ;
-    schema:name "{ttitle}" ;
-    schema:byArtist "{artist}" ;
-    schema:image "{cover}" ;
-    schema:audio "{preview}" ;
-    komc:featuredIn <https://knowledgemap.kr/komc/resource/movie/{m_uri}> ;
-{tags_str}
-    schema:genre "Movie Soundtrack" .
-"""
-        return Response(ttl, mimetype='text/turtle')
-
-    except Exception as e:
-        print(f"TTL Error: {e}")
-        return f"# Error: {e}", 500
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # [핵심] 영화와 OST 정보를 조인해서 가져옴 (랭킹 순)
-        # 영화 정보만 있고 OST가 없어도 영화는 나오도록 LEFT JOIN 사용
-        query = """
-            SELECT m.movie_id, m.title, m.rank, m.poster_url, 
-                   t.track_id, t.track_title, t.artist_name, t.preview_url, a.album_cover_url
-            FROM MOVIES m
-            LEFT JOIN MOVIE_OSTS mo ON m.movie_id = mo.movie_id
-            LEFT JOIN TRACKS t ON mo.track_id = t.track_id
-            LEFT JOIN ALBUMS a ON t.album_id = a.album_id
-            WHERE m.rank IS NOT NULL  -- 랭킹이 있는 영화만 조회
-            ORDER BY m.rank ASC
-        """
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        
-        ttl = """@prefix schema: <http://schema.org/> .
-@prefix komc: <https://knowledgemap.kr/komc/def/> .
-@prefix tag: <https://knowledgemap.kr/komc/def/tag/> .
-"""
-        tag_cursor = conn.cursor()
-
-        # 중복 방지를 위한 세트
-        processed_movies = set()
-
-        for row in rows:
-            mid, mtitle, rank, mposter, tid, ttitle, artist, preview, cover = row
-            
-            # 영화 ID 인코딩 (URL 안전하게)
-            m_uri = base64.urlsafe_b64encode(mid.encode()).decode().rstrip("=")
-            
-            # [중요] 영화 정보는 한 번만 정의
-            if mid not in processed_movies:
-                mposter = mposter or "img/playlist-placeholder.png"
-                ttl += f"""
-<https://knowledgemap.kr/komc/resource/movie/{m_uri}> a schema:Movie ;
-    schema:name "{mtitle}" ;
-    schema:image "{mposter}" ;
-    komc:rank {rank} .
-"""
-                processed_movies.add(mid)
-
-            # [중요] 트랙 정보 정의 (영화와 연결)
-            # 트랙이 없으면(tid is None) 가상의 OST 정보를 만들어서라도 연결해줌
-            t_uri_suffix = tid if tid else f"{m_uri}_ost"
-            ttitle = ttitle or f"{mtitle} (OST 정보 없음)"
-            artist = artist or "Unknown Artist"
-            cover = cover or mposter # 앨범 커버 없으면 영화 포스터 사용
-            preview = preview or ""
-
-            # 태그 조회
-            tags_str = ""
-            if tid:
-                try:
-                    tag_cursor.execute("SELECT tag_id FROM TRACK_TAGS WHERE track_id = :1", [tid])
-                    tags = [t[0].replace('tag:', '') for t in tag_cursor.fetchall()]
-                    if tags:
-                        tags_str = f"    komc:relatedTag tag:{', tag:'.join(tags)} ;"
-                except: pass
-
-            ttl += f"""
-<https://knowledgemap.kr/komc/resource/track/{t_uri_suffix}> a schema:MusicRecording ;
-    schema:name "{ttitle}" ;
-    schema:byArtist "{artist}" ;
-    schema:image "{cover}" ;
-    schema:audio "{preview}" ;
-    komc:featuredIn <https://knowledgemap.kr/komc/resource/movie/{m_uri}> ;
-{tags_str}
-    schema:genre "Movie Soundtrack" .
-"""
-        return Response(ttl, mimetype='text/turtle')
-        
-    except Exception as e:
-        print(f"TTL Error: {e}")
-        return f"# Error generating TTL: {e}", 500
     try:
         conn = get_db_connection(); cur = conn.cursor()
         cur.execute("SELECT m.movie_id, m.title, m.rank, m.poster_url, t.track_id, t.track_title, t.artist_name, t.preview_url, a.album_cover_url FROM MOVIES m LEFT JOIN MOVIE_OSTS mo ON m.movie_id=mo.movie_id LEFT JOIN TRACKS t ON mo.track_id=t.track_id LEFT JOIN ALBUMS a ON t.album_id=a.album_id WHERE m.rank<=10 ORDER BY m.rank ASC")
