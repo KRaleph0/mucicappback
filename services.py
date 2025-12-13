@@ -62,10 +62,14 @@ def save_track_details(track_id, cursor, headers, genres=[]):
         img = t_data.get('album', {}).get('images', [{}])[0].get('url', '')
         bpm = a_data.get('tempo', 0)
         
-        # DB 저장 (MERGE)
+        # [수정] ALBUMS 저장 시 Named Parameter 사용으로 에러(DPY-4009) 해결
         if aid:
-            cursor.execute("MERGE INTO ALBUMS USING dual ON (album_id=:1) WHEN NOT MATCHED THEN INSERT (album_id, album_cover_url) VALUES (:1, :2)", [aid, img])
+            cursor.execute("""
+                MERGE INTO ALBUMS USING dual ON (album_id=:aid) 
+                WHEN NOT MATCHED THEN INSERT (album_id, album_cover_url) VALUES (:aid, :img)
+            """, {'aid': aid, 'img': img})
         
+        # TRACKS 저장
         cursor.execute("""
             MERGE INTO TRACKS t USING dual ON (t.track_id=:tid)
             WHEN MATCHED THEN UPDATE SET t.image_url=:img, t.preview_url=:prev
