@@ -1,0 +1,177 @@
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix komc: <https://knowledgemap.kr/komc/def/> .
+@prefix dct: <http://purl.org/dc/terms/> .
+
+# ==========================================
+# 🌤️ 1. 날씨 컨텍스트 (Weather)
+# ==========================================
+komc:WeatherContext a skos:ConceptScheme ;
+    dct:title "Weather Contexts for Music Recommendation"@en ;
+    skos:hasTopConcept komc:Weather_Rain, komc:Weather_Clear, komc:Weather_Clouds, komc:Weather_Snow, komc:Weather_Thunderstorm, komc:Weather_Drizzle, komc:Weather_Default .
+
+komc:Weather_Rain a skos:Concept ; skos:prefLabel "Rain"@en ; skos:related komc:tag_RainyDay, komc:tag_Sentimental, komc:tag_Depressed, komc:tag_Calm .
+komc:Weather_Clear a skos:Concept ; skos:prefLabel "Clear"@en ; skos:related komc:tag_Drive, komc:tag_Excited, komc:tag_Refreshing, komc:tag_Travel .
+komc:Weather_Clouds a skos:Concept ; skos:prefLabel "Clouds"@en ; skos:related komc:tag_Walk, komc:tag_Calm, komc:tag_Cafe, komc:tag_Rest .
+komc:Weather_Snow a skos:Concept ; skos:prefLabel "Snow"@en ; skos:related komc:tag_Winter, komc:tag_Snow, komc:tag_Warm, komc:tag_Christmas .
+komc:Weather_Thunderstorm a skos:Concept ; skos:prefLabel "Thunderstorm"@en ; skos:related komc:tag_Intense, komc:tag_Tension, komc:tag_Dark .
+komc:Weather_Drizzle a skos:Concept ; skos:prefLabel "Drizzle"@en ; skos:related komc:tag_Rain, komc:tag_Dawn, komc:tag_Sentimental .
+komc:Weather_Default a skos:Concept ; skos:prefLabel "Default"@en ; skos:related komc:tag_Refresh, komc:tag_Rest, komc:tag_Trendy .
+
+# ==========================================
+# 🎵 2. 장르 컨텍스트 (Genre Hierarchy)
+# ==========================================
+komc:GenreContext a skos:ConceptScheme ;
+    dct:title "Genre Concepts with Sub-genres"@en ;
+    skos:hasTopConcept komc:Genre_Pop, komc:Genre_Ballad, komc:Genre_Dance, komc:Genre_HipHop, komc:Genre_RnB, komc:Genre_Rock, komc:Genre_Indie, komc:Genre_JPop .
+
+# --- [1] Pop & Sub-genres ---
+komc:Genre_Pop a skos:Concept ; 
+    skos:prefLabel "Pop"@en ; 
+    skos:narrower komc:Genre_KPop, komc:Genre_SynthPop ; 
+    skos:related komc:tag_Pop, komc:tag_Trendy, komc:tag_Popular .
+
+komc:Genre_KPop a skos:Concept ;
+    skos:prefLabel "K-Pop"@en ;
+    skos:broader komc:Genre_Pop ;
+    skos:related komc:tag_Korea, komc:tag_Idol, komc:tag_Performance .
+
+komc:Genre_SynthPop a skos:Concept ;
+    skos:prefLabel "Synth Pop"@en ;
+    skos:broader komc:Genre_Pop ;
+    skos:related komc:tag_Retro, komc:tag_Synthesizer, komc:tag_NewWave .
+
+
+# --- [2] HipHop & Sub-genres ---
+komc:Genre_HipHop a skos:Concept ; 
+    skos:prefLabel "HipHop"@en ; 
+    skos:narrower komc:Genre_Trap, komc:Genre_Boombap ;
+    skos:related komc:tag_HipHop, komc:tag_Rap, komc:tag_Swag .
+
+komc:Genre_Trap a skos:Concept ;
+    skos:prefLabel "Trap"@en ;
+    skos:broader komc:Genre_HipHop ;
+    skos:related komc:tag_Beat, komc:tag_Bass, komc:tag_Club .
+
+komc:Genre_Boombap a skos:Concept ;
+    skos:prefLabel "Boom Bap"@en ;
+    skos:broader komc:Genre_HipHop ;
+    skos:related komc:tag_OldSchool, komc:tag_Groovy .
+
+
+# --- [3] Rock & Sub-genres ---
+komc:Genre_Rock a skos:Concept ; 
+    skos:prefLabel "Rock"@en ; 
+    skos:narrower komc:Genre_Metal, komc:Genre_Alternative ;
+    skos:related komc:tag_Rock, komc:tag_Band, komc:tag_Cool .
+
+komc:Genre_Metal a skos:Concept ;
+    skos:prefLabel "Metal"@en ;
+    skos:broader komc:Genre_Rock ;
+    skos:related komc:tag_Intense, komc:tag_Dark, komc:tag_ElectricGuitar .
+
+komc:Genre_Alternative a skos:Concept ;
+    skos:prefLabel "Alternative Rock"@en ;
+    skos:broader komc:Genre_Rock ;
+    skos:related komc:tag_Sentimental, komc:tag_ModernRock .
+
+
+# --- [4] J-Pop & Sub-genres ---
+komc:Genre_JPop a skos:Concept ; 
+    skos:prefLabel "J-Pop"@en ; 
+    skos:narrower komc:Genre_CityPop, komc:Genre_AniSong ;
+    skos:related komc:tag_Jpop, komc:tag_Japan .
+
+komc:Genre_CityPop a skos:Concept ;
+    skos:prefLabel "City Pop"@en ;
+    skos:broader komc:Genre_JPop ;
+    skos:related komc:tag_Retro, komc:tag_Drive, komc:tag_Night, komc:tag_City .
+
+komc:Genre_AniSong a skos:Concept ;
+    skos:prefLabel "Animation Song"@en ;
+    skos:broader komc:Genre_JPop ;
+    skos:related komc:tag_Anime, komc:tag_Excited, komc:tag_Otaku .
+
+
+# --- [5] RnB & Sub-genres ---
+komc:Genre_RnB a skos:Concept ; 
+    skos:prefLabel "R&B"@en ; 
+    skos:narrower komc:Genre_NeoSoul ;
+    skos:related komc:tag_RnB, komc:tag_Soul, komc:tag_Groovy .
+
+komc:Genre_NeoSoul a skos:Concept ;
+    skos:prefLabel "Neo Soul"@en ;
+    skos:broader komc:Genre_RnB ;
+    skos:related komc:tag_Jazz, komc:tag_Calm, komc:tag_Night .
+
+
+# --- [6] Others (Ballad, Dance, Indie) ---
+komc:Genre_Ballad a skos:Concept ; skos:prefLabel "Ballad"@en ; skos:related komc:tag_Ballad, komc:tag_Sentimental, komc:tag_Sad, komc:tag_Love .
+komc:Genre_Dance a skos:Concept ; skos:prefLabel "Dance"@en ; skos:narrower komc:Genre_House ; skos:related komc:tag_Dance, komc:tag_Party, komc:tag_Excited .
+komc:Genre_House a skos:Concept ; skos:prefLabel "House"@en ; skos:broader komc:Genre_Dance ; skos:related komc:tag_Club, komc:tag_Beat .
+komc:Genre_Indie a skos:Concept ; skos:prefLabel "Indie"@en ; skos:related komc:tag_Indie, komc:tag_Acoustic, komc:tag_Cafe .
+
+
+# ==========================================
+# 🏷️ 3. 태그 정의 (자동 매핑용)
+# ==========================================
+komc:tag_RainyDay a skos:Concept ; skos:prefLabel "비오는날"@ko .
+komc:tag_Sentimental a skos:Concept ; skos:prefLabel "감성"@ko .
+komc:tag_Depressed a skos:Concept ; skos:prefLabel "우울"@ko .
+komc:tag_Calm a skos:Concept ; skos:prefLabel "잔잔한"@ko .
+komc:tag_Drive a skos:Concept ; skos:prefLabel "드라이브"@ko .
+komc:tag_Excited a skos:Concept ; skos:prefLabel "신나는"@ko .
+komc:tag_Refreshing a skos:Concept ; skos:prefLabel "청량"@ko .
+komc:tag_Travel a skos:Concept ; skos:prefLabel "여행"@ko .
+komc:tag_Walk a skos:Concept ; skos:prefLabel "산책"@ko .
+komc:tag_Cafe a skos:Concept ; skos:prefLabel "카페"@ko .
+komc:tag_Rest a skos:Concept ; skos:prefLabel "휴식"@ko .
+komc:tag_Winter a skos:Concept ; skos:prefLabel "겨울"@ko .
+komc:tag_Snow a skos:Concept ; skos:prefLabel "눈"@ko .
+komc:tag_Warm a skos:Concept ; skos:prefLabel "따뜻한"@ko .
+komc:tag_Christmas a skos:Concept ; skos:prefLabel "크리스마스"@ko .
+komc:tag_Intense a skos:Concept ; skos:prefLabel "강렬한"@ko .
+komc:tag_Tension a skos:Concept ; skos:prefLabel "긴장감"@ko .
+komc:tag_Dark a skos:Concept ; skos:prefLabel "다크"@ko .
+komc:tag_Rain a skos:Concept ; skos:prefLabel "비"@ko .
+komc:tag_Dawn a skos:Concept ; skos:prefLabel "새벽"@ko .
+komc:tag_Refresh a skos:Concept ; skos:prefLabel "기분전환"@ko .
+komc:tag_Trendy a skos:Concept ; skos:prefLabel "트렌디"@ko .
+komc:tag_Pop a skos:Concept ; skos:prefLabel "팝"@ko .
+komc:tag_Popular a skos:Concept ; skos:prefLabel "인기"@ko .
+komc:tag_Korea a skos:Concept ; skos:prefLabel "한국"@ko .
+komc:tag_Idol a skos:Concept ; skos:prefLabel "아이돌"@ko .
+komc:tag_Performance a skos:Concept ; skos:prefLabel "퍼포먼스"@ko .
+komc:tag_Retro a skos:Concept ; skos:prefLabel "레트로"@ko .
+komc:tag_Synthesizer a skos:Concept ; skos:prefLabel "신디사이저"@ko .
+komc:tag_NewWave a skos:Concept ; skos:prefLabel "뉴웨이브"@ko .
+komc:tag_Ballad a skos:Concept ; skos:prefLabel "발라드"@ko .
+komc:tag_Sad a skos:Concept ; skos:prefLabel "슬픔"@ko .
+komc:tag_Love a skos:Concept ; skos:prefLabel "사랑"@ko .
+komc:tag_Emotional a skos:Concept ; skos:prefLabel "애절한"@ko .
+komc:tag_Dance a skos:Concept ; skos:prefLabel "댄스"@ko .
+komc:tag_Party a skos:Concept ; skos:prefLabel "파티"@ko .
+komc:tag_Club a skos:Concept ; skos:prefLabel "클럽"@ko .
+komc:tag_HipHop a skos:Concept ; skos:prefLabel "힙합"@ko .
+komc:tag_Rap a skos:Concept ; skos:prefLabel "랩"@ko .
+komc:tag_Swag a skos:Concept ; skos:prefLabel "스웨그"@ko .
+komc:tag_Beat a skos:Concept ; skos:prefLabel "비트"@ko .
+komc:tag_Bass a skos:Concept ; skos:prefLabel "베이스"@ko .
+komc:tag_OldSchool a skos:Concept ; skos:prefLabel "올드스쿨"@ko .
+komc:tag_RnB a skos:Concept ; skos:prefLabel "알앤비"@ko .
+komc:tag_Soul a skos:Concept ; skos:prefLabel "소울"@ko .
+komc:tag_Groovy a skos:Concept ; skos:prefLabel "그루비"@ko .
+komc:tag_Jazz a skos:Concept ; skos:prefLabel "재즈"@ko .
+komc:tag_Night a skos:Concept ; skos:prefLabel "밤"@ko .
+komc:tag_Rock a skos:Concept ; skos:prefLabel "락"@ko .
+komc:tag_Band a skos:Concept ; skos:prefLabel "밴드"@ko .
+komc:tag_Cool a skos:Concept ; skos:prefLabel "시원한"@ko .
+komc:tag_ElectricGuitar a skos:Concept ; skos:prefLabel "일렉기타"@ko .
+komc:tag_ModernRock a skos:Concept ; skos:prefLabel "모던락"@ko .
+komc:tag_Indie a skos:Concept ; skos:prefLabel "인디"@ko .
+komc:tag_Acoustic a skos:Concept ; skos:prefLabel "어쿠스틱"@ko .
+komc:tag_Chill a skos:Concept ; skos:prefLabel "칠한"@ko .
+komc:tag_Jpop a skos:Concept ; skos:prefLabel "Jpop"@ko .
+komc:tag_Japan a skos:Concept ; skos:prefLabel "일본"@ko .
+komc:tag_City a skos:Concept ; skos:prefLabel "도시"@ko .
+komc:tag_Anime a skos:Concept ; skos:prefLabel "애니메이션"@ko .
+komc:tag_Otaku a skos:Concept ; skos:prefLabel "오타쿠"@ko .

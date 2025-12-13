@@ -1,47 +1,51 @@
-# skos_manager.py - 초간단 하드코딩 버전
+from rdflib import Graph, Namespace, URIRef
+from rdflib.namespace import SKOS, RDF
 
 class SkosManager:
-    def __init__(self, file_path=None):
-        # 여기에 [하위태그] : [상위태그 목록] 을 정의하세요.
-        # "이 태그(Key)가 달리면 -> 저 태그들(Value)도 같이 달아라" 라는 뜻입니다.
-        self.broader_map = {
-            # 장르 계층
-            "tag:K-Pop": ["tag:Pop"],
-            "tag:J-Pop": ["tag:Pop"],
-            "tag:HipHop": ["tag:Exciting"],
-            "tag:Rock": ["tag:Exciting"],
-            "tag:Ballad": ["tag:Sentimental"],
-            "tag:R&B": ["tag:Sentimental", "tag:Pop"],
-            "tag:Dance": ["tag:Exciting", "tag:Pop"],
-            
-            # 분위기 계층
-            "tag:Rain": ["tag:Sentimental"],
-            "tag:Snow": ["tag:Romance", "tag:Sentimental"],
-            "tag:Party": ["tag:Exciting"],
-            "tag:Morning": ["tag:Clear"],
-            "tag:Night": ["tag:Rest", "tag:Sentimental"],
-            "tag:Drive": ["tag:Exciting", "tag:Pop"],
-        }
-        print(f"✅ [SKOS] 임시 계층 구조 로드됨 ({len(self.broader_map)}개 규칙)")
+    def __init__(self, file_path):
+        self.g = Graph()
+        try:
+            self.g.parse(file_path, format="turtle")
+            print(f"✅ SKOS data loaded from {file_path}")
+        except Exception as e:
+            print(f"❌ Failed to load SKOS data: {e}")
 
+        self.KOMC = Namespace("https://knowledgemap.kr/komc/def/")
+    
     def get_broader_tags(self, tag):
-        """
-        입력된 태그(tag)와 그 상위 개념들을 모두 찾아서 리스트로 반환합니다.
-        예: 'tag:K-Pop' 입력 -> ['tag:K-Pop', 'tag:Pop'] 반환
-        """
-        # 1. 기본적으로 자기 자신은 포함
-        expanded_tags = {tag}
+        """기존 기능: 상위 태그 찾기"""
+        tag = tag.replace("tag:", "")
+        tag_uri = self.KOMC[f"tag_{tag}"]
         
-        # 2. 상위 개념이 있다면 추가
-        if tag in self.broader_map:
-            parents = self.broader_map[tag]
-            expanded_tags.update(parents)
-            # (옵션) 2단계 상위까지 찾으려면 여기서 parents를 순회하며 재귀 호출 가능
+        broader_tags = set()
+        for parent in self.g.objects(tag_uri, SKOS.broader):
+            # URI에서 라벨 추출 (예: komc:tag_Jpop -> tag:Jpop)
+            label = parent.split('/')[-1].replace('tag_', 'tag:')
+            broader_tags.add(label)
             
-        return list(expanded_tags)
+        return broader_tags
 
-# 테스트용
-if __name__ == "__main__":
-    skos = SkosManager()
-    print(skos.get_broader_tags("tag:K-Pop")) 
-    # 출력: ['tag:K-Pop', 'tag:Pop']
+    def get_weather_tags(self, weather_keyword):
+        """
+        [NEW] 날씨 키워드를 받아서 skos:related로 연결된 태그들의 '한글 라벨'을 반환
+        예: 'Rain' -> ['비오는날', '감성', '우울', '잔잔한']
+        """
+        # TTL에 정의된 URI 패턴: komc:Weather_Rain, komc:Weather_Clear ...
+        weather_uri = self.KOMC[f"Weather_{weather_keyword}"]
+        
+        related_tags = []
+        
+        # 1. 해당 날씨 개념이 있는지 확인
+        if (weather_uri, RDF.type, SKOS.Concept) not in self.g:
+            print(f"⚠️ SKOS: Undefined weather '{weather_keyword}', using Default.")
+            weather_uri = self.KOMC["Weather_Default"]
+
+        # 2. skos:related로 연결된 태그 찾기
+        for related_concept in self.g.objects(weather_uri, SKOS.related):
+            # 3. 그 태그의 한글 라벨(prefLabel) 가져오기
+            for label in self.g.objects(related_concept, SKOS.prefLabel):
+                if label.language == 'ko':
+                    related_tags.append(str(label))
+        
+        print(f"🔍 SKOS Weather Mapping: {weather_keyword} -> {related_tags}")
+        return related_tags
