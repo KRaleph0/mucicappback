@@ -96,7 +96,7 @@ def get_box_office_ttl():
     except Exception as e: return make_response(f"# Error: {str(e)}", 500, {'Content-Type': 'text/turtle'})
 
 # =========================================================
-# 3. 검색 API (DB 에러 수정: 앨범 JOIN 제거)
+# 3. 검색 API
 # =========================================================
 @app.route('/api/search', methods=['GET'])
 def api_search():
@@ -107,14 +107,13 @@ def api_search():
 
     db_items = []
     
-    # 1. 태그 검색인 경우 (DB 우선 조회)
+    # 1. 태그 검색 (ALBUMS 조인 제거로 안정성 확보)
     if q.startswith('tag:'):
         try:
             print(f"🔎 [Search] DB 태그 검색 시도: {q}")
             conn = get_db_connection()
             cur = conn.cursor()
             
-            # [수정] 에러를 유발하던 'a.album_title'과 'JOIN ALBUMS' 제거
             cur.execute("""
                 SELECT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
                 FROM TRACKS t 
@@ -131,7 +130,7 @@ def api_search():
                     "name": f"[추천] {r[1]}",
                     "artists": [{"name": r[2]}],
                     "album": {
-                        "name": "Unknown Album", # 앨범 제목은 하드코딩 (에러 방지)
+                        "name": "Unknown Album",
                         "images": [{"url": r[3] or "img/playlist-placeholder.png"}]
                     },
                     "preview_url": r[4],
@@ -142,7 +141,7 @@ def api_search():
         except Exception as e:
             print(f"❌ DB 검색 오류: {e}")
 
-    # 2. Spotify 검색 (DB 결과 뒤에 붙임)
+    # 2. Spotify 검색
     spotify_items = []
     try:
         headers = get_spotify_headers()
@@ -175,7 +174,9 @@ def api_search():
         }
     })
 
-# ... (나머지 유저, 파일 관련 API 코드는 기존과 동일하게 유지) ...
+# =========================================================
+# 4. 유저 및 태그 관리 API
+# =========================================================
 @app.route('/api/auth/signup', methods=['POST'])
 def api_signup():
     d = request.get_json(force=True, silent=True) or {}
@@ -262,19 +263,20 @@ def api_add_tags(tid):
         conn.commit(); return jsonify({"message": "Saved"})
     except: return jsonify({"error": "Error"}), 500
 
+# [중요] 여기가 문제였습니다! (오타 수정됨)
 @app.route('/api/track/<tid>/tags', methods=['GET'])
 def api_get_tags(tid):
     try:
         conn = get_db_connection(); cur = conn.cursor()
         cur.execute("SELECT tag_id FROM TRACK_TAGS WHERE track_id=:1", [tid])
-        return jsonify([r[0].replace('tag:', '') for r in cursor.fetchall()])
+        # [수정] cursor.fetchall() -> cur.fetchall() 로 변경
+        return jsonify([r[0].replace('tag:', '') for r in cur.fetchall()])
     except: return jsonify([])
 
 @app.route('/api/track/<track_id>.ttl', methods=['GET'])
 def get_track_detail_ttl(track_id):
     try:
         conn = get_db_connection(); cur = conn.cursor()
-        # [수정] 상세 페이지에서도 ALBUM JOIN 제거
         cur.execute("SELECT track_title, artist_name, album_id, preview_url, image_url, bpm, music_key, duration, views FROM TRACKS WHERE track_id=:1", [track_id])
         row = cur.fetchone()
         if not row: return "Not Found", 404
