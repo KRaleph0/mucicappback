@@ -96,7 +96,7 @@ def get_box_office_ttl():
     except Exception as e: return make_response(f"# Error: {str(e)}", 500, {'Content-Type': 'text/turtle'})
 
 # =========================================================
-# 3. 검색 API (대소문자 무시 + 하이브리드 검색) [핵심 수정]
+# 3. 검색 API (DB 에러 수정: 앨범 JOIN 제거)
 # =========================================================
 @app.route('/api/search', methods=['GET'])
 def api_search():
@@ -114,12 +114,11 @@ def api_search():
             conn = get_db_connection()
             cur = conn.cursor()
             
-            # [수정] LOWER() 함수로 대소문자 통일해서 비교 (Jpop == jpop)
+            # [수정] 에러를 유발하던 'a.album_title'과 'JOIN ALBUMS' 제거
             cur.execute("""
-                SELECT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url, a.album_title
+                SELECT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
                 FROM TRACKS t 
                 JOIN TRACK_TAGS tt ON t.track_id = tt.track_id
-                LEFT JOIN ALBUMS a ON t.album_id = a.album_id
                 WHERE LOWER(tt.tag_id) = LOWER(:tag)
                 ORDER BY t.views DESC
             """, [q.strip()]) 
@@ -129,10 +128,10 @@ def api_search():
             for r in rows:
                 db_items.append({
                     "id": r[0],
-                    "name": f"[추천] {r[1]}", # 제목 앞에 [추천]을 붙여서 확실히 구분
+                    "name": f"[추천] {r[1]}",
                     "artists": [{"name": r[2]}],
                     "album": {
-                        "name": r[5] or "Unknown",
+                        "name": "Unknown Album", # 앨범 제목은 하드코딩 (에러 방지)
                         "images": [{"url": r[3] or "img/playlist-placeholder.png"}]
                     },
                     "preview_url": r[4],
@@ -154,17 +153,15 @@ def api_search():
     except Exception as e:
         print(f"❌ Spotify 검색 오류: {e}")
 
-    # 3. 결과 합치기 (DB 결과 우선 + 중복 제거)
+    # 3. 결과 합치기
     seen_ids = set()
     final_items = []
     
-    # DB 결과 먼저 넣기 (최상위 노출)
     for item in db_items:
         if item['id'] not in seen_ids:
             final_items.append(item)
             seen_ids.add(item['id'])
             
-    # Spotify 결과 뒤에 붙이기
     for item in spotify_items:
         if item['id'] not in seen_ids:
             final_items.append(item)
@@ -277,6 +274,7 @@ def api_get_tags(tid):
 def get_track_detail_ttl(track_id):
     try:
         conn = get_db_connection(); cur = conn.cursor()
+        # [수정] 상세 페이지에서도 ALBUM JOIN 제거
         cur.execute("SELECT track_title, artist_name, album_id, preview_url, image_url, bpm, music_key, duration, views FROM TRACKS WHERE track_id=:1", [track_id])
         row = cur.fetchone()
         if not row: return "Not Found", 404
