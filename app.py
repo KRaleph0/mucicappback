@@ -170,11 +170,11 @@ def api_search():
 
     db_items = []
     
-    # 1. 태그 검색 (스마트 확장 검색)
     if q.startswith('tag:'):
         try:
             print(f"🔎 [Search] DB 태그 검색 시도: {q}")
             tag_keyword = q.replace('tag:', '').strip()
+            original_tag_full = f"tag:{tag_keyword}" # 사용자가 검색한 원본 태그 (예: tag:Pop)
             
             search_tags = [tag_keyword]
             # [핵심] new_data.ttl을 로드한 skos_manager로 검색어 확장
@@ -188,15 +188,24 @@ def api_search():
             cur = conn.cursor()
             
             final_search_terms = [f"tag:{t}" for t in search_tags]
+            
+            # 동적 바인딩 변수 생성
             bind_names = [f":t{i}" for i in range(len(final_search_terms))]
             bind_dict = {f"t{i}": t for i, t in enumerate(final_search_terms)}
             
+            # [수정] 정렬 우선순위를 위해 원본 태그도 바인딩에 추가
+            bind_dict["original_tag"] = original_tag_full
+            
+            # [핵심 SQL 변경] 
+            # 1. DISTINCT 대신 GROUP BY 사용 (정렬 로직을 위해)
+            # 2. ORDER BY에 CASE 문 추가: 원본 태그와 같으면 1등, 아니면 2등
             sql = f"""
-                SELECT DISTINCT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
+                SELECT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url, t.views
                 FROM TRACKS t 
                 JOIN TRACK_TAGS tt ON t.track_id = tt.track_id
                 WHERE LOWER(tt.tag_id) IN ({','.join(['LOWER(' + b + ')' for b in bind_names])})
-                ORDER BY t.views DESC
+                GROUP BY t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url, t.views
+                ORDER BY MIN(CASE WHEN LOWER(tt.tag_id) = LOWER(:original_tag) THEN 1 ELSE 2 END) ASC, t.views DESC
             """
             
             cur.execute(sql, bind_dict)
@@ -216,7 +225,6 @@ def api_search():
             print(f"✅ DB 검색 결과: {len(db_items)}건")
         except Exception as e:
             print(f"❌ DB 검색 오류: {e}")
-
     # 2. Spotify 검색
     spotify_items = []
     try:
