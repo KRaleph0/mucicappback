@@ -267,11 +267,20 @@ def api_add_tags(tid):
 @app.route('/api/track/<tid>/tags', methods=['GET'])
 def api_get_tags(tid):
     try:
-        conn = get_db_connection(); cur = conn.cursor()
+        print(f"🔎 [Tag Request] Track ID: {tid}") # 로그 추가
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
         cur.execute("SELECT tag_id FROM TRACK_TAGS WHERE track_id=:1", [tid])
-        # [수정] cursor.fetchall() -> cur.fetchall() 로 변경
-        return jsonify([r[0].replace('tag:', '') for r in cur.fetchall()])
-    except: return jsonify([])
+        rows = cur.fetchall()
+        
+        print(f"   👉 Found {len(rows)} tags") # 조회 결과 개수 출력
+        
+        return jsonify([r[0].replace('tag:', '') for r in rows])
+
+    except Exception as e:
+        print(f"❌ [Tag API Error] {e}") # 에러 메시지를 서버 로그에 출력
+        return jsonify([])
 
 @app.route('/api/track/<track_id>.ttl', methods=['GET'])
 def get_track_detail_ttl(track_id):
