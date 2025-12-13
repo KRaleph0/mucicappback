@@ -1,51 +1,47 @@
-import os
-from rdflib import Graph, Namespace, RDF, SKOS
+# skos_manager.py - 초간단 하드코딩 버전
 
 class SkosManager:
-    def __init__(self, ttl_file_path):
-        self.graph = Graph()
-        self.TAG = Namespace("https://knowledgemap.kr/komc/def/tag/")
-        
-        # 파일 로드
-        if os.path.exists(ttl_file_path):
-            self.graph.parse(ttl_file_path, format="turtle")
-            print(f"✅ SKOS 데이터 로드 완료: {len(self.graph)}개의 관계")
-        else:
-            print(f"⚠️ SKOS 파일을 찾을 수 없습니다: {ttl_file_path}")
+    def __init__(self, file_path=None):
+        # 여기에 [하위태그] : [상위태그 목록] 을 정의하세요.
+        # "이 태그(Key)가 달리면 -> 저 태그들(Value)도 같이 달아라" 라는 뜻입니다.
+        self.broader_map = {
+            # 장르 계층
+            "tag:K-Pop": ["tag:Pop"],
+            "tag:J-Pop": ["tag:Pop"],
+            "tag:HipHop": ["tag:Exciting"],
+            "tag:Rock": ["tag:Exciting"],
+            "tag:Ballad": ["tag:Sentimental"],
+            "tag:R&B": ["tag:Sentimental", "tag:Pop"],
+            "tag:Dance": ["tag:Exciting", "tag:Pop"],
+            
+            # 분위기 계층
+            "tag:Rain": ["tag:Sentimental"],
+            "tag:Snow": ["tag:Romance", "tag:Sentimental"],
+            "tag:Party": ["tag:Exciting"],
+            "tag:Morning": ["tag:Clear"],
+            "tag:Night": ["tag:Rest", "tag:Sentimental"],
+            "tag:Drive": ["tag:Exciting", "tag:Pop"],
+        }
+        print(f"✅ [SKOS] 임시 계층 구조 로드됨 ({len(self.broader_map)}개 규칙)")
 
-    def get_broader_tags(self, tag_name):
+    def get_broader_tags(self, tag):
         """
-        입력: 'KPop' (또는 'tag:KPop')
-        출력: {'KPop', 'Pop', 'Genre'} (자기 자신 포함 상위 개념 모두 반환)
+        입력된 태그(tag)와 그 상위 개념들을 모두 찾아서 리스트로 반환합니다.
+        예: 'tag:K-Pop' 입력 -> ['tag:K-Pop', 'tag:Pop'] 반환
         """
-        # 'tag:' 접두사 처리
-        clean_name = tag_name.replace("tag:", "")
-        subject = self.TAG[clean_name]
+        # 1. 기본적으로 자기 자신은 포함
+        expanded_tags = {tag}
         
-        # 결과 집합 (중복 제거)
-        expanded_tags = set()
-        expanded_tags.add(f"tag:{clean_name}") # 자기 자신 추가
-
-        # 재귀적으로 상위 개념(broader) 탐색
-        self._find_parents_recursive(subject, expanded_tags)
-        
+        # 2. 상위 개념이 있다면 추가
+        if tag in self.broader_map:
+            parents = self.broader_map[tag]
+            expanded_tags.update(parents)
+            # (옵션) 2단계 상위까지 찾으려면 여기서 parents를 순회하며 재귀 호출 가능
+            
         return list(expanded_tags)
 
-    def _find_parents_recursive(self, concept, result_set):
-        # SPARQL 스타일보다 가벼운 방식: 직접 트리플 조회
-        # (concept) skos:broader (parent)
-        for parent in self.graph.objects(concept, SKOS.broader):
-            # URI에서 이름만 추출 (예: .../tag/Pop -> Pop)
-            parent_name = parent.split('/')[-1]
-            tag_str = f"tag:{parent_name}"
-            
-            if tag_str not in result_set:
-                result_set.add(tag_str)
-                # 부모의 부모도 찾으러 감 (재귀)
-                self._find_parents_recursive(parent, result_set)
-
-# 테스트용 코드
+# 테스트용
 if __name__ == "__main__":
-    manager = SkosManager("skos-definition.ttl")
-    print("K-Pop 확장:", manager.get_broader_tags("KPop"))
-    print("R&B 확장:", manager.get_broader_tags("ContemporaryRnB"))
+    skos = SkosManager()
+    print(skos.get_broader_tags("tag:K-Pop")) 
+    # 출력: ['tag:K-Pop', 'tag:Pop']

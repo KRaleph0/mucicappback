@@ -32,6 +32,7 @@ with app.app_context():
     init_db_pool()
 
 # =========================================================
+<<<<<<< Updated upstream
 # 1. 관리자 & 로그 API (요구사항 1번)
 # =========================================================
 
@@ -96,16 +97,30 @@ def get_context_recommendation():
     except Exception as e:
         print(f"[Context Error] {e}")
         return jsonify({"error": str(e)}), 500
+=======
+# 1. 영화/TTL 데이터 API
+# =========================================================
+
+@app.route('/api/admin/update-movies', methods=['POST'])
+def admin_update_movies():
+    try: return jsonify({"message": update_box_office_data()})
+    except Exception as e: return jsonify({"error": str(e)}), 500
+>>>>>>> Stashed changes
 
 @app.route('/api/data/box-office.ttl', methods=['GET'])
 def get_box_office_ttl():
     """박스오피스 TTL 생성 (500 에러 해결 - 안전한 쿼리 사용)"""
     try:
+<<<<<<< Updated upstream
         conn = get_db_connection()
         cursor = conn.cursor()
         
         # LEFT JOIN을 사용하여 OST 정보가 없어도 영화 정보는 출력되도록 수정
         cursor.execute("""
+=======
+        conn = get_db_connection(); cur = conn.cursor()
+        cur.execute("""
+>>>>>>> Stashed changes
             SELECT m.movie_id, m.title, m.rank, m.poster_url, 
                    t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
             FROM MOVIES m
@@ -113,8 +128,9 @@ def get_box_office_ttl():
             LEFT JOIN TRACKS t ON mo.track_id = t.track_id
             ORDER BY m.rank ASC
         """)
-        rows = cursor.fetchall()
+        rows = cur.fetchall()
         
+<<<<<<< Updated upstream
         ttl_parts = [
             "@prefix schema: <http://schema.org/> .",
             "@prefix komc: <https://knowledgemap.kr/komc/def/> .",
@@ -158,6 +174,25 @@ def get_box_office_ttl():
 # 3. 검색 API (요구사항 3번 - 태그 검색 우선순위)
 # =========================================================
 
+=======
+        ttl = "@prefix schema: <http://schema.org/> .\n@prefix komc: <https://knowledgemap.kr/komc/def/> .\n@prefix tag: <https://knowledgemap.kr/komc/def/tag/> .\n"
+        seen = set()
+        for r in rows:
+            mid_raw, title, rank, poster = r[0], r[1], r[2], r[3]
+            if not mid_raw or title in seen: continue
+            seen.add(title)
+            
+            mid = base64.urlsafe_b64encode(str(mid_raw).encode()).decode().rstrip("=")
+            img = poster or r[7] or "img/playlist-placeholder.png"
+            tid = r[4] or f"{mid}_ost"
+            ttl += f"""<https://knowledgemap.kr/resource/movie/{mid}> a schema:Movie ; schema:name "{title}" ; schema:image "{img}" ; komc:rank {rank} .\n<https://knowledgemap.kr/resource/track/{tid}> a schema:MusicRecording ; schema:name "{r[5] or 'OST 정보 없음'}" ; schema:byArtist "{r[6] or 'Unknown'}" ; schema:image "{img}" ; komc:featuredIn <https://knowledgemap.kr/resource/movie/{mid}> .\n"""
+        return Response(ttl, mimetype='text/turtle')
+    except: return Response("# Error", mimetype='text/turtle')
+
+# =========================================================
+# 2. [핵심] 검색 API (태그 우선 검색 복구)
+# =========================================================
+>>>>>>> Stashed changes
 @app.route('/api/search', methods=['GET'])
 def api_search():
     q = request.args.get('q', '')
@@ -165,6 +200,7 @@ def api_search():
     
     if not q: return jsonify({"error": "No query"}), 400
 
+<<<<<<< Updated upstream
     # [핵심] 태그 검색(tag:...)인 경우 로컬 DB를 최우선으로 검색
     if q.startswith('tag:'):
         target_tag = q.strip()
@@ -173,6 +209,16 @@ def api_search():
             conn = get_db_connection(); cur = conn.cursor()
             
             # 태그가 일치하는 곡을 조회수(views) 높은 순으로 가져옴
+=======
+    # [1] 태그 검색이면 -> 로컬 DB 우선 조회
+    if q.startswith('tag:'):
+        target_tag = q.strip()
+        try:
+            print(f"🔎 [Search] 태그 검색 시도: {target_tag}")
+            conn = get_db_connection(); cur = conn.cursor()
+            
+            # 태그가 달린 곡들을 조회수(views) 순으로 가져옴
+>>>>>>> Stashed changes
             cur.execute("""
                 SELECT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url, 
                        a.album_title, a.album_id
@@ -184,7 +230,11 @@ def api_search():
             """, [target_tag])
             rows = cur.fetchall()
             
+<<<<<<< Updated upstream
             # Spotify 포맷으로 변환하여 반환 (프론트엔드 호환성)
+=======
+            # Spotify 포맷으로 변환 (프론트엔드 호환성 유지)
+>>>>>>> Stashed changes
             items = []
             for r in rows:
                 items.append({
@@ -192,6 +242,7 @@ def api_search():
                     "name": r[1],
                     "artists": [{"name": r[2]}],
                     "album": {
+<<<<<<< Updated upstream
                         "name": r[5] or "Unknown",
                         "images": [{"url": r[3] or "img/playlist-placeholder.png"}]
                     },
@@ -210,6 +261,24 @@ def api_search():
             print(f"❌ [Search Error] {e}")
 
     # [기존] 일반 검색 또는 DB에 태그가 없을 경우 Spotify API 사용
+=======
+                        "name": r[5] or "Unknown Album",
+                        "images": [{"url": r[3] or "img/playlist-placeholder.png"}],
+                        "release_date": ""
+                    },
+                    "preview_url": r[4],
+                    "external_urls": {"spotify": f"https://open.spotify.com/track/{r[0]}"}
+                })
+            
+            print(f"✅ [Search] 태그 결과 {len(items)}건 발견")
+            return jsonify({"tracks": {"items": items}})
+
+        except Exception as e:
+            print(f"❌ [Search Error] {e}")
+            # 에러 시 빈 결과 반환
+
+    # [2] 일반 검색 -> Spotify API
+>>>>>>> Stashed changes
     try:
         headers = get_spotify_headers()
         params = {"q": q, "type": "track,album,artist", "limit": "20", "offset": offset, "market": "KR"}
@@ -218,9 +287,14 @@ def api_search():
     except Exception as e: return jsonify({"error": str(e)}), 500
 
 # =========================================================
+<<<<<<< Updated upstream
 # 4. 유저 및 기타 API
 # =========================================================
 
+=======
+# 3. 유저 & 프로필 API
+# =========================================================
+>>>>>>> Stashed changes
 @app.route('/api/auth/signup', methods=['POST'])
 def api_signup():
     d = request.get_json(force=True, silent=True) or {}
@@ -240,7 +314,11 @@ def api_login():
         cur.execute("SELECT user_id, password, nickname, profile_img, role FROM USERS WHERE user_id=:1", [uid])
         u = cur.fetchone()
         if u and check_password_hash(u[1], pw): 
+<<<<<<< Updated upstream
             return jsonify({"message":"OK", "user": {"id":u[0], "nickname":u[2], "profile_img":u[3], "role":u[4]}}) # role 반환 필수
+=======
+            return jsonify({"message":"OK", "user": {"id":u[0], "nickname":u[2], "profile_img":u[3], "role":u[4]}})
+>>>>>>> Stashed changes
         return jsonify({"error": "Invalid"}), 401
     except: return jsonify({"error": "Error"}), 500
 
@@ -274,11 +352,17 @@ def api_user_update():
         return jsonify({"message": "Updated", "image_url": img_url})
     except Exception as e: return jsonify({"error": str(e)}), 500
 
+<<<<<<< Updated upstream
 @app.route('/api/admin/update-movies', methods=['POST'])
 def admin_update_movies():
     try: return jsonify({"message": update_box_office_data()})
     except Exception as e: return jsonify({"error": str(e)}), 500
 
+=======
+# =========================================================
+# 4. 기타 API
+# =========================================================
+>>>>>>> Stashed changes
 @app.route('/api/spotify-token', methods=['GET'])
 def api_token(): return jsonify({"access_token": get_spotify_headers().get('Authorization', '').split(' ')[1]})
 
@@ -291,6 +375,7 @@ def api_up_ost(mid):
         tid = extract_spotify_id(link)
         if not tid: return jsonify({"error": "Link Error"}), 400
         res = save_track_details(tid, cur, get_spotify_headers(), [])
+<<<<<<< Updated upstream
         
         cur.execute("DELETE FROM MOVIE_OSTS WHERE movie_id=:1", [mid])
         cur.execute("INSERT INTO MOVIE_OSTS (movie_id, track_id) VALUES (:1, :2)", [mid, tid])
@@ -301,6 +386,11 @@ def api_up_ost(mid):
             VALUES ('MOVIE_OST', :1, 'UPDATE', 'NONE', :2, :3)
         """, [mid, tid, uid])
         
+=======
+        cur.execute("DELETE FROM MOVIE_OSTS WHERE movie_id=:1", [mid])
+        cur.execute("INSERT INTO MOVIE_OSTS (movie_id, track_id) VALUES (:1, :2)", [mid, tid])
+        cur.execute("INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, previous_value, new_value, user_id) VALUES ('MOVIE_OST', :1, 'UPDATE', 'NONE', :2, :3)", [mid, tid, uid])
+>>>>>>> Stashed changes
         conn.commit()
         return jsonify({"message": "Updated", "new_track": res['name']})
     except Exception as e: return jsonify({"error": str(e)}), 500
@@ -308,7 +398,10 @@ def api_up_ost(mid):
 @app.route('/api/track/<tid>/tags', methods=['POST'])
 def api_add_tags(tid):
     d = request.get_json(force=True); tags = d.get('tags', [])
+<<<<<<< Updated upstream
     uid = d.get('user_id', 'anonymous')
+=======
+>>>>>>> Stashed changes
     try:
         conn = get_db_connection(); cur = conn.cursor()
         for t in tags:
@@ -318,10 +411,14 @@ def api_add_tags(tid):
             targets = {t}
             if skos_manager: targets.update(skos_manager.get_broader_tags(t))
             for final_tag in targets:
+<<<<<<< Updated upstream
                 try: 
                     cur.execute("MERGE INTO TRACK_TAGS t USING (SELECT :1 a, :2 b FROM dual) s ON (t.track_id=s.a AND t.tag_id=s.b) WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.a, s.b)", [tid, final_tag])
                     # [로그 남기기]
                     cur.execute("INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, new_value, user_id) VALUES ('TRACK_TAG', :1, 'ADD', :2, :3)", [tid, final_tag, uid])
+=======
+                try: cur.execute("MERGE INTO TRACK_TAGS t USING (SELECT :1 a, :2 b FROM dual) s ON (t.track_id=s.a AND t.tag_id=s.b) WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.a, s.b)", [tid, final_tag])
+>>>>>>> Stashed changes
                 except: pass
         conn.commit()
         return jsonify({"message": "Tags Saved"})
