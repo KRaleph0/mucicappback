@@ -170,62 +170,84 @@ def api_search():
 
     db_items = []
     
+    # 1. 태그 검색
     if q.startswith('tag:'):
         try:
             print(f"🔎 [Search] DB 태그 검색 시도: {q}")
             tag_keyword = q.replace('tag:', '').strip()
-            original_tag_full = f"tag:{tag_keyword}" # 사용자가 검색한 원본 태그 (예: tag:Pop)
+            original_tag_clean = tag_keyword.lower() # 비교용 (pop)
             
             search_tags = [tag_keyword]
-            # [핵심] new_data.ttl을 로드한 skos_manager로 검색어 확장
+            
+            # SKOS 확장
             if skos_manager:
                 expanded = skos_manager.get_narrower_tags(tag_keyword)
                 if expanded:
                     search_tags = expanded
-                    print(f"   👉 [Smart Search] '{tag_keyword}' 검색 확장 -> {len(search_tags)}개 태그: {search_tags}")
+                    print(f"   👉 [Smart Search] 확장된 태그 목록({len(search_tags)}개): {search_tags}")
 
             conn = get_db_connection()
             cur = conn.cursor()
             
+            # 태그 목록 바인딩
             final_search_terms = [f"tag:{t}" for t in search_tags]
-            
-            # 동적 바인딩 변수 생성
             bind_names = [f":t{i}" for i in range(len(final_search_terms))]
             bind_dict = {f"t{i}": t for i, t in enumerate(final_search_terms)}
             
-            # [수정] 정렬 우선순위를 위해 원본 태그도 바인딩에 추가
-            bind_dict["original_tag"] = original_tag_full
-            
-            # [핵심 SQL 변경] 
-            # 1. DISTINCT 대신 GROUP BY 사용 (정렬 로직을 위해)
-            # 2. ORDER BY에 CASE 문 추가: 원본 태그와 같으면 1등, 아니면 2등
+            # [수정] 복잡한 GROUP BY 제거 -> DISTINCT로 단순화 (일단 다 가져오기)
+            # 조회수(views)와 태그ID(tag_id)도 가져와서 나중에 정렬 점수로 씀
             sql = f"""
-                SELECT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url, t.views
+                SELECT DISTINCT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url, t.views, tt.tag_id
                 FROM TRACKS t 
                 JOIN TRACK_TAGS tt ON t.track_id = tt.track_id
                 WHERE LOWER(tt.tag_id) IN ({','.join(['LOWER(' + b + ')' for b in bind_names])})
-                GROUP BY t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url, t.views
-                ORDER BY MIN(CASE WHEN LOWER(tt.tag_id) = LOWER(:original_tag) THEN 1 ELSE 2 END) ASC, t.views DESC
             """
             
             cur.execute(sql, bind_dict)
             rows = cur.fetchall()
+            
+            # [수정] 파이썬에서 중복 제거 및 정렬 수행
+            # track_id를 키로 사용하여 중복 제거하되, 점수 계산
+            temp_tracks = {}
+            
             for r in rows:
-                db_items.append({
-                    "id": r[0],
-                    "name": f"[추천] {r[1]}",
-                    "artists": [{"name": r[2]}],
-                    "album": {
-                        "name": "Unknown Album",
-                        "images": [{"url": r[3] or "img/playlist-placeholder.png"}]
-                    },
-                    "preview_url": r[4],
-                    "external_urls": {"spotify": f"http://googleusercontent.com/spotify.com/{r[0]}"}
-                })
-            print(f"✅ DB 검색 결과: {len(db_items)}건")
+                tid = r[0]
+                current_tag_suffix = r[6].replace('tag:', '').lower()
+                views = r[5] or 0
+                
+                # 점수 산정: 검색어와 정확히 일치하면 100억점, 아니면 조회수 점수
+                # 이렇게 하면 'Pop' 검색 시 'tag:Pop' 곡이 무조건 위로 감
+                score = views
+                if current_tag_suffix == original_tag_clean:
+                    score += 10_000_000_000 # 압도적인 우선순위 부여
+                
+                # 이미 리스트에 있는데 점수가 더 높으면 갱신 (같은 곡이 여러 태그 가질 수 있음)
+                if tid not in temp_tracks or score > temp_tracks[tid]['score']:
+                    temp_tracks[tid] = {
+                        "data": {
+                            "id": r[0],
+                            "name": f"[추천] {r[1]}",
+                            "artists": [{"name": r[2]}],
+                            "album": {
+                                "name": "Unknown Album",
+                                "images": [{"url": r[3] or "img/playlist-placeholder.png"}]
+                            },
+                            "preview_url": r[4],
+                            "external_urls": {"spotify": f"http://googleusercontent.com/spotify.com/{r[0]}"}
+                        },
+                        "score": score
+                    }
+
+            # 점수 내림차순 정렬 (높은 점수 = 정확한 태그 or 높은 조회수)
+            sorted_tracks = sorted(temp_tracks.values(), key=lambda x: x['score'], reverse=True)
+            db_items = [t['data'] for t in sorted_tracks]
+
+            print(f"✅ DB 검색 결과: {len(db_items)}건 발견")
+            
         except Exception as e:
             print(f"❌ DB 검색 오류: {e}")
-    # 2. Spotify 검색
+
+    # 2. Spotify 검색 (기존 유지)
     spotify_items = []
     try:
         headers = get_spotify_headers()
@@ -236,13 +258,19 @@ def api_search():
     except Exception as e:
         print(f"❌ Spotify 검색 오류: {e}")
 
-    # 3. 결과 합치기
+    # 3. 결과 합치기 (DB 결과 우선)
     seen_ids = set()
     final_items = []
+    
     for item in db_items:
-        if item['id'] not in seen_ids: final_items.append(item); seen_ids.add(item['id'])
+        if item['id'] not in seen_ids:
+            final_items.append(item)
+            seen_ids.add(item['id'])
+            
     for item in spotify_items:
-        if item['id'] not in seen_ids: final_items.append(item); seen_ids.add(item['id'])
+        if item['id'] not in seen_ids:
+            final_items.append(item)
+            seen_ids.add(item['id'])
 
     return jsonify({
         "tracks": {
