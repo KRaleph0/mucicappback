@@ -14,11 +14,11 @@ from database import get_db_connection, close_db, init_db_pool
 from services import update_box_office_data, save_track_details
 from utils import allowed_file, verify_turnstile, get_spotify_headers, get_current_weather, get_today_holiday, extract_spotify_id
 
-# SKOS 매니저 로드 (시맨틱 웹 기능)
+# [수정] 성공한 파일명("new_data.ttl")을 읽도록 변경했습니다!
 try:
     from skos_manager import SkosManager
-    skos_manager = SkosManager("skos-definition.ttl")
-    print("✅ SKOS Manager Loaded Successfully.")
+    skos_manager = SkosManager("new_data.ttl")
+    print("✅ SKOS Manager Loaded Successfully (from new_data.ttl).")
 except Exception as e:
     print(f"⚠️ SKOS Load Error: {e}")
     skos_manager = None
@@ -65,13 +65,13 @@ def admin_update_movies():
 @app.route('/api/recommend/context', methods=['GET'])
 def get_context_recommendation():
     try:
-        weather = get_current_weather() # 예: "Rain"
-        holiday = get_today_holiday()   # 예: "Christmas"
+        weather = get_current_weather()
+        holiday = get_today_holiday()
         
         target_tags = []
         message = ""
 
-        # 1. 특일(기념일) 우선 처리
+        # 1. 특일 우선
         if holiday:
             message = f"오늘은 {holiday}! 이런 분위기 어때요?"
             target_tags = [holiday, "파티", "기념일"]
@@ -80,7 +80,6 @@ def get_context_recommendation():
         else:
             message = f"현재 날씨({weather})에 딱 맞는 무드"
             if skos_manager:
-                # SKOS 그래프에서 'Rain'과 연관된 한글 태그들을 가져옴
                 target_tags = skos_manager.get_weather_tags(weather)
             else:
                 target_tags = ["휴식", "기분전환"]
@@ -94,11 +93,9 @@ def get_context_recommendation():
             search_tags = [f"tag:{t}" for t in target_tags]
             if not search_tags: search_tags = ["tag:기분전환"]
 
-            # 동적 IN 절 생성
             bind_names = [f":t{i}" for i in range(len(search_tags))]
             bind_dict = {f"t{i}": t for i, t in enumerate(search_tags)}
             
-            # 랜덤 4곡 추천
             sql = f"""
                 SELECT DISTINCT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
                 FROM TRACKS t
@@ -162,7 +159,7 @@ def get_box_office_ttl():
     except Exception as e: return make_response(f"# Error: {str(e)}", 500, {'Content-Type': 'text/turtle'})
 
 # =========================================================
-# 3. 검색 API (대소문자 무시 + JOIN 에러 해결)
+# 3. 검색 API (SKOS 검색 확장 적용)
 # =========================================================
 @app.route('/api/search', methods=['GET'])
 def api_search():
@@ -173,15 +170,14 @@ def api_search():
 
     db_items = []
     
-    # 1. 태그 검색 (스마트 확장 검색 적용)
+    # 1. 태그 검색 (스마트 확장 검색)
     if q.startswith('tag:'):
         try:
             print(f"🔎 [Search] DB 태그 검색 시도: {q}")
             tag_keyword = q.replace('tag:', '').strip()
             
-            # [핵심] SKOS를 이용해 하위 장르까지 검색어 확장
-            # 예: 'Pop' -> ['Pop', 'Jpop', 'Kpop', 'CityPop', ...]
             search_tags = [tag_keyword]
+            # [핵심] new_data.ttl을 로드한 skos_manager로 검색어 확장
             if skos_manager:
                 expanded = skos_manager.get_narrower_tags(tag_keyword)
                 if expanded:
@@ -191,12 +187,10 @@ def api_search():
             conn = get_db_connection()
             cur = conn.cursor()
             
-            # 태그 목록을 SQL 파라미터로 변환
             final_search_terms = [f"tag:{t}" for t in search_tags]
             bind_names = [f":t{i}" for i in range(len(final_search_terms))]
             bind_dict = {f"t{i}": t for i, t in enumerate(final_search_terms)}
             
-            # 확장된 태그 목록으로 IN 검색
             sql = f"""
                 SELECT DISTINCT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
                 FROM TRACKS t 
@@ -206,72 +200,6 @@ def api_search():
             """
             
             cur.execute(sql, bind_dict)
-            rows = cur.fetchall()
-            
-            for r in rows:
-                db_items.append({
-                    "id": r[0],
-                    "name": f"[추천] {r[1]}",
-                    "artists": [{"name": r[2]}],
-                    "album": {
-                        "name": "Unknown Album",
-                        "images": [{"url": r[3] or "img/playlist-placeholder.png"}]
-                    },
-                    "preview_url": r[4],
-                    "external_urls": {"spotify": f"http://googleusercontent.com/spotify.com/{r[0]}"}
-                })
-            print(f"✅ DB 검색 결과: {len(db_items)}건")
-            
-        except Exception as e:
-            print(f"❌ DB 검색 오류: {e}")
-
-    # ... (Spotify 검색 및 결과 병합 로직은 기존 유지) ...
-    spotify_items = []
-    try:
-        headers = get_spotify_headers()
-        params = {"q": q, "type": "track", "limit": "20", "offset": offset, "market": "KR"}
-        res = requests.get(f"{SPOTIFY_API_BASE}/search", headers=headers, params=params)
-        if res.status_code == 200:
-            spotify_items = res.json().get('tracks', {}).get('items', [])
-    except Exception as e:
-        print(f"❌ Spotify 검색 오류: {e}")
-
-    seen_ids = set()
-    final_items = []
-    for item in db_items:
-        if item['id'] not in seen_ids: final_items.append(item); seen_ids.add(item['id'])
-    for item in spotify_items:
-        if item['id'] not in seen_ids: final_items.append(item); seen_ids.add(item['id'])
-
-    return jsonify({
-        "tracks": {
-            "items": final_items,
-            "total": len(final_items),
-            "offset": offset
-        }
-    })
-    q = request.args.get('q', '')
-    offset = int(request.args.get('offset', '0'))
-    
-    if not q: return jsonify({"error": "No query"}), 400
-
-    db_items = []
-    
-    # 1. 태그 검색 (ALBUMS 조인 제거)
-    if q.startswith('tag:'):
-        try:
-            print(f"🔎 [Search] DB 태그 검색 시도: {q}")
-            conn = get_db_connection()
-            cur = conn.cursor()
-            
-            cur.execute("""
-                SELECT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
-                FROM TRACKS t 
-                JOIN TRACK_TAGS tt ON t.track_id = tt.track_id
-                WHERE LOWER(tt.tag_id) = LOWER(:tag)
-                ORDER BY t.views DESC
-            """, [q.strip()]) 
-            
             rows = cur.fetchall()
             for r in rows:
                 db_items.append({
@@ -396,7 +324,7 @@ def api_add_tags(tid):
             if not t: continue
             if not t.startswith('tag:'): t = f"tag:{t}"
             targets = {t}
-            # [SKOS] 상위 개념 자동 추가 (예: CityPop -> JPop)
+            # [SKOS] 상위 태그 자동 추가
             if skos_manager: targets.update(skos_manager.get_broader_tags(t))
             for final_tag in targets:
                 try: 
