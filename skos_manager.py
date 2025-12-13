@@ -12,26 +12,47 @@ class SkosManager:
 
         self.KOMC = Namespace("https://knowledgemap.kr/komc/def/")
     
+    def _find_concept_uri(self, tag_text):
+        """
+        태그 텍스트(예: 'jpop')와 일치하는 SKOS 개념 URI를 대소문자 무시하고 찾음
+        """
+        tag_clean = tag_text.replace("tag:", "").strip().lower()
+        
+        # 1. 태그 개념(tag_*) 검색
+        for s in self.g.subjects(RDF.type, SKOS.Concept):
+            # URI 끝부분 추출 (예: .../tag_Jpop -> Jpop)
+            uri_suffix = str(s).split("_")[-1].lower()
+            if uri_suffix == tag_clean:
+                return s
+        
+        # 2. 장르 개념(Genre_*) 검색 (혹시 Genre_Pop 등을 태그로 썼을 경우)
+        for s in self.g.subjects(RDF.type, SKOS.Concept):
+            uri_suffix = str(s).split("_")[-1].lower()
+            # Genre_Pop -> pop
+            if uri_suffix == tag_clean:
+                return s
+                
+        return None
+
     def get_broader_tags(self, tag):
         """상위 태그 찾기 (예: CityPop -> JPop)"""
-        tag = tag.replace("tag:", "")
-        tag_uri = self.KOMC[f"tag_{tag}"]
-        if (tag_uri, RDF.type, SKOS.Concept) not in self.g:
-             # 태그가 아니라 장르 개념일 수도 있으므로 확인 (예: Genre_CityPop)
-             tag_uri = self.KOMC[f"Genre_{tag}"]
+        tag_uri = self._find_concept_uri(tag)
+        if not tag_uri:
+            return set()
 
         broader_tags = set()
         for parent in self.g.objects(tag_uri, SKOS.broader):
-            # 부모 개념이 Genre_JPop 형태라면 -> tag:Jpop으로 변환해야 함
-            # 단순화를 위해 related된 태그를 찾거나, 이름을 파싱
-            parent_name = parent.split('/')[-1].replace('Genre_', '').replace('tag_', '')
-            broader_tags.add(parent_name)
+            # 부모 URI에서 이름 추출 (Genre_Pop -> Pop, tag_Retro -> Retro)
+            name = str(parent).split("_")[-1]
+            broader_tags.add(name)
             
         return broader_tags
 
     def get_weather_tags(self, weather_keyword):
         """날씨 -> 태그 매핑"""
         weather_uri = self.KOMC[f"Weather_{weather_keyword}"]
+        
+        # 정의되지 않은 날씨면 Default 사용
         if (weather_uri, RDF.type, SKOS.Concept) not in self.g:
             weather_uri = self.KOMC["Weather_Default"]
             
@@ -42,43 +63,28 @@ class SkosManager:
                     related_tags.append(str(label))
         return related_tags
 
-    # [NEW] 하위 태그 모두 찾기 (재귀 탐색)
     def get_narrower_tags(self, tag):
-        """
-        입력: 'Pop'
-        출력: {'Pop', 'Jpop', 'Kpop', 'CityPop', ...} (자신 포함 모든 하위 태그)
-        """
-        tag = tag.replace("tag:", "")
-        # 입력이 태그 이름일 수도 있고 장르 이름일 수도 있음
-        # SKOS에서 해당 라벨을 가진 개념(Concept)을 찾음
-        root_concept = None
-        
-        # 1. 개념 찾기 (prefLabel이 일치하는 것)
-        for s, p, o in self.g.triples((None, SKOS.prefLabel, None)):
-            if str(o).lower() == tag.lower() or str(o).replace("-", "").lower() == tag.replace("-", "").lower():
-                root_concept = s
-                break
-        
-        # 못 찾았으면 이름으로 추정 (Genre_Pop 등)
-        if not root_concept:
-            root_concept = self.KOMC[f"Genre_{tag}"]
-
-        all_tags = {tag} # 자기 자신 포함
+        """하위 태그 모두 찾기 (재귀) - 검색 확장용"""
+        root_concept = self._find_concept_uri(tag)
+        all_tags = {tag.replace("tag:", "")} # 자기 자신 포함
 
         if not root_concept:
-            return all_tags
+            return list(all_tags)
 
-        # 2. 하위 개념 재귀 탐색
         def find_children(concept):
             for child in self.g.objects(concept, SKOS.narrower):
-                # 자식 개념의 '관련 태그(related)' 정보를 가져옴
+                # 자식 개념과 관련된 태그 라벨 추출
+                # 1. related된 태그 찾기
                 for related_tag in self.g.objects(child, SKOS.related):
-                    # komc:tag_Jpop -> "Jpop" 추출
-                    tag_code = related_tag.split('/')[-1].replace('tag_', '')
-                    if tag_code not in all_tags:
-                        all_tags.add(tag_code)
-                        # print(f"   [확장] {tag} -> {tag_code}")
+                    tag_name = str(related_tag).split("_")[-1]
+                    if tag_name not in all_tags:
+                        all_tags.add(tag_name)
                 
+                # 2. 자식 개념 자체의 이름도 태그로 간주 (예: Genre_KPop -> KPop)
+                child_name = str(child).split("_")[-1]
+                if child_name not in all_tags:
+                    all_tags.add(child_name)
+
                 # 재귀 호출
                 find_children(child)
 
