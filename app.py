@@ -173,6 +173,90 @@ def api_search():
 
     db_items = []
     
+    # 1. 태그 검색 (스마트 확장 검색 적용)
+    if q.startswith('tag:'):
+        try:
+            print(f"🔎 [Search] DB 태그 검색 시도: {q}")
+            tag_keyword = q.replace('tag:', '').strip()
+            
+            # [핵심] SKOS를 이용해 하위 장르까지 검색어 확장
+            # 예: 'Pop' -> ['Pop', 'Jpop', 'Kpop', 'CityPop', ...]
+            search_tags = [tag_keyword]
+            if skos_manager:
+                expanded = skos_manager.get_narrower_tags(tag_keyword)
+                if expanded:
+                    search_tags = expanded
+                    print(f"   👉 [Smart Search] '{tag_keyword}' 검색 확장 -> {len(search_tags)}개 태그: {search_tags}")
+
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # 태그 목록을 SQL 파라미터로 변환
+            final_search_terms = [f"tag:{t}" for t in search_tags]
+            bind_names = [f":t{i}" for i in range(len(final_search_terms))]
+            bind_dict = {f"t{i}": t for i, t in enumerate(final_search_terms)}
+            
+            # 확장된 태그 목록으로 IN 검색
+            sql = f"""
+                SELECT DISTINCT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url
+                FROM TRACKS t 
+                JOIN TRACK_TAGS tt ON t.track_id = tt.track_id
+                WHERE LOWER(tt.tag_id) IN ({','.join(['LOWER(' + b + ')' for b in bind_names])})
+                ORDER BY t.views DESC
+            """
+            
+            cur.execute(sql, bind_dict)
+            rows = cur.fetchall()
+            
+            for r in rows:
+                db_items.append({
+                    "id": r[0],
+                    "name": f"[추천] {r[1]}",
+                    "artists": [{"name": r[2]}],
+                    "album": {
+                        "name": "Unknown Album",
+                        "images": [{"url": r[3] or "img/playlist-placeholder.png"}]
+                    },
+                    "preview_url": r[4],
+                    "external_urls": {"spotify": f"http://googleusercontent.com/spotify.com/{r[0]}"}
+                })
+            print(f"✅ DB 검색 결과: {len(db_items)}건")
+            
+        except Exception as e:
+            print(f"❌ DB 검색 오류: {e}")
+
+    # ... (Spotify 검색 및 결과 병합 로직은 기존 유지) ...
+    spotify_items = []
+    try:
+        headers = get_spotify_headers()
+        params = {"q": q, "type": "track", "limit": "20", "offset": offset, "market": "KR"}
+        res = requests.get(f"{SPOTIFY_API_BASE}/search", headers=headers, params=params)
+        if res.status_code == 200:
+            spotify_items = res.json().get('tracks', {}).get('items', [])
+    except Exception as e:
+        print(f"❌ Spotify 검색 오류: {e}")
+
+    seen_ids = set()
+    final_items = []
+    for item in db_items:
+        if item['id'] not in seen_ids: final_items.append(item); seen_ids.add(item['id'])
+    for item in spotify_items:
+        if item['id'] not in seen_ids: final_items.append(item); seen_ids.add(item['id'])
+
+    return jsonify({
+        "tracks": {
+            "items": final_items,
+            "total": len(final_items),
+            "offset": offset
+        }
+    })
+    q = request.args.get('q', '')
+    offset = int(request.args.get('offset', '0'))
+    
+    if not q: return jsonify({"error": "No query"}), 400
+
+    db_items = []
+    
     # 1. 태그 검색 (ALBUMS 조인 제거)
     if q.startswith('tag:'):
         try:
