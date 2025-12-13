@@ -4,9 +4,8 @@ import config
 def check_tag_data(target_tag):
     print(f"\n🔍 [DB 진단 시작] 검색어: '{target_tag}' 확인 중...")
     
-    conn = None
+    conn = None # [중요] 변수 초기화 추가됨
     try:
-        # [수정] Flask 의존성 없이 직접 연결
         conn = oracledb.connect(
             user=config.DB_USER,
             password=config.DB_PASSWORD,
@@ -14,8 +13,8 @@ def check_tag_data(target_tag):
         )
         cur = conn.cursor()
 
-        # 1. 태그 테이블에 데이터가 있는지 확인 (대소문자 무시)
-        print("\n1️⃣ TRACK_TAGS 테이블 조회 결과:")
+        print("\n1️⃣ 태그 데이터 조회 (대소문자 무시):")
+        # LOWER 함수로 대소문자 무시하고 검색
         cur.execute("""
             SELECT tag_id, COUNT(*) 
             FROM TRACK_TAGS 
@@ -25,33 +24,10 @@ def check_tag_data(target_tag):
         
         tags = cur.fetchall()
         if not tags:
-            print("   ❌ 해당 태그 데이터가 아예 없습니다.")
+            print("   ❌ 해당 태그가 포함된 데이터가 아예 없습니다.")
         else:
             for t in tags:
-                print(f"   ✅ 발견됨: '{t[0]}' (연결된 곡: {t[1]}개)")
-
-        # 2. 실제 검색 쿼리 시뮬레이션
-        print(f"\n2️⃣ 검색 API 로직 시뮬레이션 (검색어: {target_tag}):")
-        cur.execute("""
-            SELECT t.track_title, t.artist_name, tt.tag_id
-            FROM TRACKS t 
-            JOIN TRACK_TAGS tt ON t.track_id = tt.track_id
-            WHERE LOWER(tt.tag_id) = LOWER(:tag)
-        """, [target_tag])
-        
-        rows = cur.fetchall()
-        if rows:
-            print(f"   🎉 검색 성공! 총 {len(rows)}개의 곡이 조회됩니다.")
-            for i, r in enumerate(rows[:5]):
-                print(f"   - {i+1}. {r[0]} / {r[1]} (태그: {r[2]})")
-        else:
-            print("   ⚠️ 검색 결과 0건. (태그는 있지만 곡 정보와 연결되지 않음)")
-
-        # 3. 전체 태그 목록 (참고용)
-        print("\n3️⃣ 현재 DB에 저장된 태그 TOP 5:")
-        cur.execute("SELECT tag_id, count(*) as c FROM TRACK_TAGS GROUP BY tag_id ORDER BY c DESC FETCH FIRST 5 ROWS ONLY")
-        for r in cur.fetchall():
-            print(f"   - {r[0]}: {r[1]}개")
+                print(f"   ✅ 발견됨: '{t[0]}' (곡 수: {t[1]}개)")
 
     except Exception as e:
         print(f"❌ DB 오류 발생: {e}")
@@ -59,4 +35,4 @@ def check_tag_data(target_tag):
         if conn: conn.close()
 
 if __name__ == "__main__":
-    check_tag_data("tag:jpop")
+    check_tag_data("tag:jpop") # 원하는 태그 입력

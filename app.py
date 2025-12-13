@@ -31,7 +31,9 @@ app.teardown_appcontext(close_db)
 with app.app_context():
     init_db_pool()
 
-# ... (관리자 로그 API 등 기존 코드는 그대로 유지) ...
+# =========================================================
+# 1. 관리자 & 로그 API
+# =========================================================
 @app.route('/api/admin/logs', methods=['GET'])
 def get_admin_logs():
     try:
@@ -54,6 +56,9 @@ def admin_update_movies():
     try: return jsonify({"message": update_box_office_data()})
     except Exception as e: return jsonify({"error": str(e)}), 500
 
+# =========================================================
+# 2. 추천 및 데이터 API
+# =========================================================
 @app.route('/api/recommend/context', methods=['GET'])
 def get_context_recommendation():
     try:
@@ -91,7 +96,7 @@ def get_box_office_ttl():
     except Exception as e: return make_response(f"# Error: {str(e)}", 500, {'Content-Type': 'text/turtle'})
 
 # =========================================================
-# 3. 검색 API (최종 수정: 하이브리드 검색)
+# 3. 검색 API (대소문자 무시 + 하이브리드 검색) [핵심 수정]
 # =========================================================
 @app.route('/api/search', methods=['GET'])
 def api_search():
@@ -109,7 +114,7 @@ def api_search():
             conn = get_db_connection()
             cur = conn.cursor()
             
-            # [핵심] LOWER()를 사용하여 대소문자 무시 검색 (jpop == JPop)
+            # [수정] LOWER() 함수로 대소문자 통일해서 비교 (Jpop == jpop)
             cur.execute("""
                 SELECT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url, a.album_title
                 FROM TRACKS t 
@@ -124,22 +129,21 @@ def api_search():
             for r in rows:
                 db_items.append({
                     "id": r[0],
-                    "name": f"[추천] {r[1]}", # 제목 앞에 [추천] 태그를 붙여서 눈에 띄게 함
+                    "name": f"[추천] {r[1]}", # 제목 앞에 [추천]을 붙여서 확실히 구분
                     "artists": [{"name": r[2]}],
                     "album": {
                         "name": r[5] or "Unknown",
                         "images": [{"url": r[3] or "img/playlist-placeholder.png"}]
                     },
                     "preview_url": r[4],
-                    "external_urls": {"spotify": f"http://googleusercontent.com/spotify.com/{r[0]}"},
-                    "is_local": True # 로컬 데이터임을 표시
+                    "external_urls": {"spotify": f"http://googleusercontent.com/spotify.com/{r[0]}"}
                 })
             print(f"✅ DB 검색 결과: {len(db_items)}건")
             
         except Exception as e:
             print(f"❌ DB 검색 오류: {e}")
 
-    # 2. Spotify 검색 (DB 결과가 적을 때 보충하거나, 항상 검색)
+    # 2. Spotify 검색 (DB 결과 뒤에 붙임)
     spotify_items = []
     try:
         headers = get_spotify_headers()
@@ -150,12 +154,11 @@ def api_search():
     except Exception as e:
         print(f"❌ Spotify 검색 오류: {e}")
 
-    # 3. 결과 합치기 (DB 결과가 무조건 위로 오도록)
-    # 중복 제거 (Spotify에도 같은 곡이 있을 수 있으므로)
+    # 3. 결과 합치기 (DB 결과 우선 + 중복 제거)
     seen_ids = set()
     final_items = []
     
-    # DB 결과 먼저 넣기
+    # DB 결과 먼저 넣기 (최상위 노출)
     for item in db_items:
         if item['id'] not in seen_ids:
             final_items.append(item)
