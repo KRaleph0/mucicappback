@@ -119,6 +119,44 @@ def update_box_office_data():
 # 3. Spotify 트랙 정보 저장
 # ---------------------------------------------------------
 def save_track_details(track_id, cur, headers, genre_seeds=[]):
+    # 1. 이미 있는지 확인
+    cur.execute("SELECT track_title FROM TRACKS WHERE track_id=:1", [track_id])
+    row = cur.fetchone()
+    
+    # [수정] 이미 존재하면 DB에 있는 제목(row[0])을 반환하도록 수정!
+    if row:
+        return {"status": "exists", "name": row[0]}
+
+    try:
+        # config.py에 정의된 API Base URL 사용
+        r = requests.get(f"{config.SPOTIFY_API_BASE}/tracks/{track_id}", headers=headers)
+        if r.status_code != 200: return None
+        d = r.json()
+
+        title = d['name']
+        artist = d['artists'][0]['name']
+        album_id = d['album']['id']
+        preview = d.get('preview_url')
+        img = d['album']['images'][0]['url'] if d['album']['images'] else None
+        duration = d['duration_ms']
+
+        # Audio Features
+        f_res = requests.get(f"{config.SPOTIFY_API_BASE}/audio-features/{track_id}", headers=headers)
+        feat = f_res.json() if f_res.status_code == 200 else {}
+        bpm = feat.get('tempo', 0)
+        key = str(feat.get('key', -1))
+
+        # DB 저장
+        cur.execute("""
+            INSERT INTO TRACKS (track_id, track_title, artist_name, album_id, preview_url, image_url, bpm, music_key, duration, views)
+            VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, 0)
+        """, [track_id, title, artist, album_id, preview, img, bpm, key, duration])
+        
+        return {"status": "saved", "name": title}
+
+    except Exception as e:
+        print(f"❌ Track Save Error: {e}")
+        return None
     cur.execute("SELECT track_title FROM TRACKS WHERE track_id=:1", [track_id])
     if cur.fetchone():
         return {"status": "exists", "name": "Unknown"}

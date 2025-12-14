@@ -30,16 +30,19 @@ def allowed_file(filename):
 
 # [NEW] 이 함수가 꼭 필요합니다!
 def extract_spotify_id(url):
-    if not url: return None
-    # 22자리 ID가 직접 들어온 경우
-    if len(url) == 22 and re.match(r'^[a-zA-Z0-9]+$', url): return url
-    # URL (https://open.spotify.com/track/ID)
-    match = re.search(r'track/([a-zA-Z0-9]{22})', url)
-    if match: return match.group(1)
-    # URI (spotify:track:ID)
-    match = re.search(r'track:([a-zA-Z0-9]{22})', url)
-    if match: return match.group(1)
-    return None
+    # URL이 그냥 숫자거나 짧은 문자열이면 그대로 ID로 간주 (모의 서버 대응)
+    if '/' not in url:
+        return url
+        
+    # url 끝부분 추출 로직 (표준 링크 및 모의 링크 대응)
+    # 예: .../track/3 -> 3 추출
+    # 예: .../spotify.com/3 -> 3 추출
+    match = re.search(r'(?:track/|spotify\.com/|/)([\w\d]+)(?:\?|$)', url)
+    if match:
+        return match.group(1)
+        
+    # 매칭 안되면 마지막 슬래시 뒤의 값 반환
+    return url.split('/')[-1].split('?')[0]
 
 # --- 2. 보안 (Turnstile) ---
 def verify_turnstile(token):
