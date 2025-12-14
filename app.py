@@ -14,7 +14,6 @@ from database import get_db_connection, close_db, init_db_pool
 from services import update_box_office_data, save_track_details
 from utils import allowed_file, verify_turnstile, get_spotify_headers, get_current_weather, get_today_holiday, extract_spotify_id
 
-# [수정] 성공한 파일명("new_data.ttl")을 읽도록 변경했습니다!
 try:
     from skos_manager import SkosManager
     skos_manager = SkosManager("new_data.ttl")
@@ -35,7 +34,7 @@ with app.app_context():
     init_db_pool()
 
 # =========================================================
-# 1. 관리자 & 로그 API
+# 1. 관리자 & 로그 API (밴 기능 추가됨)
 # =========================================================
 @app.route('/api/admin/logs', methods=['GET'])
 def get_admin_logs():
@@ -59,40 +58,91 @@ def admin_update_movies():
     try: return jsonify({"message": update_box_office_data()})
     except Exception as e: return jsonify({"error": str(e)}), 500
 
+# [NEW] 유저 밴/언밴 API
+@app.route('/api/admin/ban', methods=['POST'])
+def api_ban_user():
+    d = request.get_json(force=True)
+    admin_id = d.get('admin_id')
+    target_user_id = d.get('target_user_id')
+    
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+        
+        # 1. 관리자 권한 확인
+        cur.execute("SELECT role FROM USERS WHERE user_id=:1", [admin_id])
+        row = cur.fetchone()
+        if not row or row[0] != 'admin':
+            return jsonify({"error": "관리자 권한이 필요합니다."}), 403
+
+        # 2. 대상 유저 상태 토글
+        cur.execute("SELECT is_banned FROM USERS WHERE user_id=:1", [target_user_id])
+        target = cur.fetchone()
+        if not target: return jsonify({"error": "유저를 찾을 수 없습니다."}), 404
+        
+        new_status = 1 if target[0] == 0 else 0
+        cur.execute("UPDATE USERS SET is_banned=:1 WHERE user_id=:2", [new_status, target_user_id])
+        
+        # 로그 기록
+        action = "BAN" if new_status == 1 else "UNBAN"
+        cur.execute("INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, new_value, user_id) VALUES ('USER_BAN', :1, :2, :3, :4)", 
+                    [target_user_id, action, str(new_status), admin_id])
+        
+        conn.commit()
+        msg = f"유저의 권한을 {'박탈(차단)' if new_status==1 else '복구'}했습니다."
+        return jsonify({"message": msg, "new_status": new_status})
+        
+    except Exception as e: return jsonify({"error": str(e)}), 500
+
+# [NEW] 곡별 태그 수정 로그 조회 (관리자용, 상세 팝업용)
+@app.route('/api/track/<tid>/logs', methods=['GET'])
+def get_track_logs(tid):
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+        sql = """
+            SELECT l.created_at, u.user_id, u.nickname, u.is_banned, l.action_type, l.new_value
+            FROM MODIFICATION_LOGS l
+            JOIN USERS u ON l.user_id = u.user_id
+            WHERE l.target_type = 'TRACK_TAG' AND l.target_id = :1
+            ORDER BY l.created_at DESC
+        """
+        cur.execute(sql, [tid])
+        rows = cur.fetchall()
+        
+        logs = [{
+            "date": r[0].strftime("%Y-%m-%d %H:%M"),
+            "user_id": r[1],
+            "nickname": r[2],
+            "is_banned": r[3],
+            "action": r[4], 
+            "tag": r[5]
+        } for r in rows]
+        
+        return jsonify(logs)
+    except Exception as e: return jsonify({"error": str(e)}), 500
+
+
 # =========================================================
-# 2. 추천 및 데이터 API (SKOS & 날씨 기반)
+# 2. 추천 및 데이터 API
 # =========================================================
 @app.route('/api/recommend/context', methods=['GET'])
 def get_context_recommendation():
     try:
         weather = get_current_weather()
         holiday = get_today_holiday()
-        
         target_tags = []
         message = ""
 
-        # 1. 특일 우선
         if holiday:
             message = f"오늘은 {holiday}! 이런 분위기 어때요?"
             target_tags = [holiday, "파티", "기념일"]
-        
-        # 2. [SKOS] 날씨 기반 태그 조회
         else:
             message = f"현재 날씨({weather})에 딱 맞는 무드"
-            if skos_manager:
-                target_tags = skos_manager.get_weather_tags(weather)
-            else:
-                target_tags = ["휴식", "기분전환"]
+            target_tags = skos_manager.get_weather_tags(weather) if skos_manager else ["휴식", "기분전환"]
 
-        # 3. 해당 태그로 DB 검색
         recommended_tracks = []
         try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            
-            search_tags = [f"tag:{t}" for t in target_tags]
-            if not search_tags: search_tags = ["tag:기분전환"]
-
+            conn = get_db_connection(); cur = conn.cursor()
+            search_tags = [f"tag:{t}" for t in target_tags] if target_tags else ["tag:기분전환"]
             bind_names = [f":t{i}" for i in range(len(search_tags))]
             bind_dict = {f"t{i}": t for i, t in enumerate(search_tags)}
             
@@ -106,28 +156,11 @@ def get_context_recommendation():
             """
             cur.execute(sql, bind_dict)
             rows = cur.fetchall()
-            
             for r in rows:
-                recommended_tracks.append({
-                    "id": r[0],
-                    "name": r[1],
-                    "artists": [{"name": r[2]}],
-                    "album": {
-                        "images": [{"url": r[3] or "img/playlist-placeholder.png"}]
-                    },
-                    "preview_url": r[4]
-                })
-        except Exception as db_e:
-            print(f"❌ Context DB Error: {db_e}")
+                recommended_tracks.append({ "id": r[0], "name": r[1], "artists": [{"name": r[2]}], "album": { "images": [{"url": r[3] or "img/playlist-placeholder.png"}] }, "preview_url": r[4] })
+        except: pass
 
-        return jsonify({
-            "message": message,
-            "weather": weather,
-            "holiday": holiday,
-            "tags": target_tags,
-            "tracks": recommended_tracks
-        })
-
+        return jsonify({ "message": message, "weather": weather, "holiday": holiday, "tags": target_tags, "tracks": recommended_tracks })
     except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route('/api/data/box-office.ttl', methods=['GET'])
@@ -159,156 +192,86 @@ def get_box_office_ttl():
     except Exception as e: return make_response(f"# Error: {str(e)}", 500, {'Content-Type': 'text/turtle'})
 
 # =========================================================
-# 3. 검색 API (SKOS 검색 확장 적용)
+# 3. 검색 API
 # =========================================================
 @app.route('/api/search', methods=['GET'])
 def api_search():
-    q = request.args.get('q', '')
-    offset = int(request.args.get('offset', '0'))
-    
+    q = request.args.get('q', ''); offset = int(request.args.get('offset', '0'))
     if not q: return jsonify({"error": "No query"}), 400
-
     db_items = []
     
-    # 1. 태그 검색
     if q.startswith('tag:'):
         try:
-            print(f"🔎 [Search] DB 태그 검색 시도: {q}")
-            tag_keyword = q.replace('tag:', '').strip()
-            original_tag_clean = tag_keyword.lower() # 비교용 (pop)
-            
+            tag_keyword = q.replace('tag:', '').strip(); original_tag_clean = tag_keyword.lower()
             search_tags = [tag_keyword]
-            
-            # SKOS 확장
             if skos_manager:
                 expanded = skos_manager.get_narrower_tags(tag_keyword)
-                if expanded:
-                    search_tags = expanded
-                    print(f"   👉 [Smart Search] 확장된 태그 목록({len(search_tags)}개): {search_tags}")
+                if expanded: search_tags = expanded
 
-            conn = get_db_connection()
-            cur = conn.cursor()
-            
-            # 태그 목록 바인딩
+            conn = get_db_connection(); cur = conn.cursor()
             final_search_terms = [f"tag:{t}" for t in search_tags]
             bind_names = [f":t{i}" for i in range(len(final_search_terms))]
             bind_dict = {f"t{i}": t for i, t in enumerate(final_search_terms)}
             
-            # [수정] 복잡한 GROUP BY 제거 -> DISTINCT로 단순화 (일단 다 가져오기)
-            # 조회수(views)와 태그ID(tag_id)도 가져와서 나중에 정렬 점수로 씀
             sql = f"""
                 SELECT DISTINCT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url, t.views, tt.tag_id
                 FROM TRACKS t 
                 JOIN TRACK_TAGS tt ON t.track_id = tt.track_id
                 WHERE LOWER(tt.tag_id) IN ({','.join(['LOWER(' + b + ')' for b in bind_names])})
             """
-            
-            cur.execute(sql, bind_dict)
-            rows = cur.fetchall()
-            
-            # [수정] 파이썬에서 중복 제거 및 정렬 수행
-            # track_id를 키로 사용하여 중복 제거하되, 점수 계산
+            cur.execute(sql, bind_dict); rows = cur.fetchall()
             temp_tracks = {}
-            
             for r in rows:
-                tid = r[0]
-                current_tag_suffix = r[6].replace('tag:', '').lower()
-                views = r[5] or 0
-                
-                # 점수 산정: 검색어와 정확히 일치하면 100억점, 아니면 조회수 점수
-                # 이렇게 하면 'Pop' 검색 시 'tag:Pop' 곡이 무조건 위로 감
-                score = views
-                if current_tag_suffix == original_tag_clean:
-                    score += 10_000_000_000 # 압도적인 우선순위 부여
-                
-                # 이미 리스트에 있는데 점수가 더 높으면 갱신 (같은 곡이 여러 태그 가질 수 있음)
+                tid = r[0]; current_tag_suffix = r[6].replace('tag:', '').lower(); views = r[5] or 0
+                score = views + (10_000_000_000 if current_tag_suffix == original_tag_clean else 0)
                 if tid not in temp_tracks or score > temp_tracks[tid]['score']:
-                    temp_tracks[tid] = {
-                        "data": {
-                            "id": r[0],
-                            "name": f"[추천] {r[1]}",
-                            "artists": [{"name": r[2]}],
-                            "album": {
-                                "name": "Unknown Album",
-                                "images": [{"url": r[3] or "img/playlist-placeholder.png"}]
-                            },
-                            "preview_url": r[4],
-                            "external_urls": {"spotify": f"http://googleusercontent.com/spotify.com/{r[0]}"}
-                        },
-                        "score": score
-                    }
-
-            # 점수 내림차순 정렬 (높은 점수 = 정확한 태그 or 높은 조회수)
+                    temp_tracks[tid] = { "data": { "id": r[0], "name": f"[추천] {r[1]}", "artists": [{"name": r[2]}], "album": { "name": "Unknown", "images": [{"url": r[3] or "img/playlist-placeholder.png"}] }, "preview_url": r[4], "external_urls": {"spotify": f"http://googleusercontent.com/spotify.com/{r[0]}"} }, "score": score }
             sorted_tracks = sorted(temp_tracks.values(), key=lambda x: x['score'], reverse=True)
             db_items = [t['data'] for t in sorted_tracks]
+        except Exception as e: print(f"❌ DB Search Error: {e}")
 
-            print(f"✅ DB 검색 결과: {len(db_items)}건 발견")
-            
-        except Exception as e:
-            print(f"❌ DB 검색 오류: {e}")
-
-    # 2. Spotify 검색 (기존 유지)
     spotify_items = []
     try:
-        headers = get_spotify_headers()
-        params = {"q": q, "type": "track", "limit": "20", "offset": offset, "market": "KR"}
+        headers = get_spotify_headers(); params = {"q": q, "type": "track", "limit": "20", "offset": offset, "market": "KR"}
         res = requests.get(f"{SPOTIFY_API_BASE}/search", headers=headers, params=params)
-        if res.status_code == 200:
-            spotify_items = res.json().get('tracks', {}).get('items', [])
-    except Exception as e:
-        print(f"❌ Spotify 검색 오류: {e}")
+        if res.status_code == 200: spotify_items = res.json().get('tracks', {}).get('items', [])
+    except: pass
 
-    # 3. 결과 합치기 (DB 결과 우선)
-    seen_ids = set()
-    final_items = []
-    
+    seen_ids = set(); final_items = []
     for item in db_items:
-        if item['id'] not in seen_ids:
-            final_items.append(item)
-            seen_ids.add(item['id'])
-            
+        if item['id'] not in seen_ids: final_items.append(item); seen_ids.add(item['id'])
     for item in spotify_items:
-        if item['id'] not in seen_ids:
-            final_items.append(item)
-            seen_ids.add(item['id'])
-
-    return jsonify({
-        "tracks": {
-            "items": final_items,
-            "total": len(final_items),
-            "offset": offset
-        }
-    })
+        if item['id'] not in seen_ids: final_items.append(item); seen_ids.add(item['id'])
+    return jsonify({ "tracks": { "items": final_items, "total": len(final_items), "offset": offset } })
 
 # =========================================================
 # 4. 유저 및 태그 관리 API
 # =========================================================
 @app.route('/api/auth/signup', methods=['POST'])
 def api_signup():
-    d = request.get_json(force=True, silent=True) or {}
-    uid = d.get('id'); pw = d.get('password'); nick = d.get('nickname')
+    d = request.get_json(force=True)
     try:
         conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("INSERT INTO USERS (user_id, password, nickname, role) VALUES (:1, :2, :3, 'user')", [uid, generate_password_hash(pw), nick])
+        cur.execute("INSERT INTO USERS (user_id, password, nickname, role, is_banned) VALUES (:1, :2, :3, 'user', 0)", [d['id'], generate_password_hash(d['password']), d['nickname']])
         conn.commit(); return jsonify({"message": "Success"})
     except: return jsonify({"error": "Fail"}), 500
 
 @app.route('/api/auth/login', methods=['POST'])
 def api_login():
-    d = request.get_json(force=True, silent=True) or {}
-    uid = d.get('id'); pw = d.get('password')
+    d = request.get_json(force=True)
     try:
         conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("SELECT user_id, password, nickname, profile_img, role FROM USERS WHERE user_id=:1", [uid])
+        # 로그인 시 is_banned 정보는 안 보내도 되지만, 확인용으로 사용 가능
+        cur.execute("SELECT user_id, password, nickname, profile_img, role, is_banned FROM USERS WHERE user_id=:1", [d['id']])
         u = cur.fetchone()
-        if u and check_password_hash(u[1], pw): return jsonify({"message":"OK", "user": {"id":u[0], "nickname":u[2], "profile_img":u[3], "role":u[4]}})
+        if u and check_password_hash(u[1], d['password']): 
+            return jsonify({"message":"OK", "user": {"id":u[0], "nickname":u[2], "profile_img":u[3], "role":u[4], "is_banned":u[5]}})
         return jsonify({"error": "Invalid"}), 401
     except: return jsonify({"error": "Error"}), 500
 
 @app.route('/api/user/profile', methods=['POST'])
 def api_profile():
-    d = request.get_json(force=True, silent=True) or {}
-    uid = d.get('user_id')
+    d = request.get_json(force=True); uid = d.get('user_id')
     try:
         conn = get_db_connection(); cur = conn.cursor()
         cur.execute("SELECT user_id, nickname, profile_img, role FROM USERS WHERE user_id=:1", [uid])
@@ -336,8 +299,7 @@ def api_token(): return jsonify({"access_token": get_spotify_headers().get('Auth
 
 @app.route('/api/movie/<mid>/update-ost', methods=['POST'])
 def api_up_ost(mid):
-    d = request.get_json(force=True, silent=True) or {}
-    link = d.get('spotifyUrl'); uid = d.get('user_id')
+    d = request.get_json(force=True); link = d.get('spotifyUrl'); uid = d.get('user_id')
     try:
         conn = get_db_connection(); cur = conn.cursor()
         tid = extract_spotify_id(link)
@@ -349,18 +311,25 @@ def api_up_ost(mid):
         conn.commit(); return jsonify({"message": "Updated", "new_track": res['name']})
     except Exception as e: return jsonify({"error": str(e)}), 500
 
+# [수정] 태그 추가 API (밴 여부 체크)
 @app.route('/api/track/<tid>/tags', methods=['POST'])
 def api_add_tags(tid):
     d = request.get_json(force=True); tags = d.get('tags', [])
     uid = d.get('user_id', 'unknown')
     try:
         conn = get_db_connection(); cur = conn.cursor()
+        
+        # 밴 여부 확인
+        cur.execute("SELECT is_banned FROM USERS WHERE user_id=:1", [uid])
+        user_row = cur.fetchone()
+        if user_row and user_row[0] == 1:
+            return jsonify({"error": "태그 편집 권한이 박탈된 계정입니다. 관리자에게 문의하세요."}), 403
+
         for t in tags:
             t = t.strip()
             if not t: continue
             if not t.startswith('tag:'): t = f"tag:{t}"
             targets = {t}
-            # [SKOS] 상위 태그 자동 추가
             if skos_manager: targets.update(skos_manager.get_broader_tags(t))
             for final_tag in targets:
                 try: 
@@ -368,7 +337,7 @@ def api_add_tags(tid):
                     cur.execute("INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, new_value, user_id) VALUES ('TRACK_TAG', :1, 'ADD', :2, :3)", [tid, final_tag, uid])
                 except: pass
         conn.commit(); return jsonify({"message": "Saved"})
-    except: return jsonify({"error": "Error"}), 500
+    except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route('/api/track/<tid>/tags', methods=['GET'])
 def api_get_tags(tid):
@@ -376,9 +345,7 @@ def api_get_tags(tid):
         conn = get_db_connection(); cur = conn.cursor()
         cur.execute("SELECT tag_id FROM TRACK_TAGS WHERE track_id=:1", [tid])
         return jsonify([r[0].replace('tag:', '') for r in cur.fetchall()])
-    except Exception as e: 
-        print(f"❌ [Tag Error] {e}")
-        return jsonify([])
+    except: return jsonify([])
 
 @app.route('/api/track/<track_id>.ttl', methods=['GET'])
 def get_track_detail_ttl(track_id):
