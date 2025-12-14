@@ -339,6 +339,40 @@ def api_add_tags(tid):
         conn.commit(); return jsonify({"message": "Saved"})
     except Exception as e: return jsonify({"error": str(e)}), 500
 
+@app.route('/api/track/<tid>/tags', methods=['DELETE'])
+def api_delete_tag(tid):
+    d = request.get_json(force=True)
+    tag_to_delete = d.get('tag')
+    uid = d.get('user_id')
+
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+
+        # 1. 유저 권한 확인 (밴 여부)
+        cur.execute("SELECT is_banned, role FROM USERS WHERE user_id=:1", [uid])
+        user_row = cur.fetchone()
+        if not user_row: return jsonify({"error": "유저 정보 없음"}), 404
+        if user_row[0] == 1: return jsonify({"error": "권한이 박탈된 계정입니다."}), 403
+
+        # 2. 태그 삭제 실행
+        # tag: 접두사가 없으면 붙여서 처리
+        if not tag_to_delete.startswith('tag:'): tag_to_delete = f"tag:{tag_to_delete}"
+
+        cur.execute("DELETE FROM TRACK_TAGS WHERE track_id=:1 AND tag_id=:2", [tid, tag_to_delete])
+        
+        if cur.rowcount > 0:
+            # 3. 로그 기록 (DELETE 액션)
+            cur.execute("INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, previous_value, user_id) VALUES ('TRACK_TAG', :1, 'DELETE', :2, :3)", 
+                        [tid, tag_to_delete, uid])
+            conn.commit()
+            return jsonify({"message": "Deleted"})
+        else:
+            return jsonify({"error": "태그를 찾을 수 없습니다."}), 404
+
+    except Exception as e: return jsonify({"error": str(e)}), 500
+
+
+
 @app.route('/api/track/<tid>/tags', methods=['GET'])
 def api_get_tags(tid):
     try:
