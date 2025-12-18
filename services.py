@@ -51,16 +51,16 @@ def update_box_office_data():
             mid = item['movieCd']
             poster = get_tmdb_poster(title) or "img/playlist-placeholder.png"
 
-            # [수정] MERGE 문을 사용하여 기존 ID가 있으면 내용만 갱신, 없으면 추가
+# [수정] MERGE 문 - Dictionary 바인딩 사용
             cur.execute("""
                 MERGE INTO MOVIES m
-                USING DUAL ON (m.movie_id = :1)
+                USING DUAL ON (m.movie_id = :mid)
                 WHEN MATCHED THEN
-                    UPDATE SET rank = :3, poster_url = :4, title = :2
+                    UPDATE SET rank = :rank, poster_url = :poster, title = :title
                 WHEN NOT MATCHED THEN
                     INSERT (movie_id, title, rank, poster_url) 
-                    VALUES (:1, :2, :3, :4)
-            """, [mid, title, rank, poster])
+                    VALUES (:mid, :title, :rank, :poster)
+            """, {'mid': mid, 'title': title, 'rank': rank, 'poster': poster})
             count += 1
             
         conn.commit(); conn.close()

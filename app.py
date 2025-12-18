@@ -351,12 +351,12 @@ def api_up_ost(mid):
         print(f"   -> 💾 DB 저장 시작 (Movie: {movie_id}, Track: {tid})")
         cur.execute("""
             MERGE INTO MOVIE_OSTS m
-            USING DUAL ON (m.movie_id = :1)
+            USING DUAL ON (m.movie_id = :mid)
             WHEN MATCHED THEN
-                UPDATE SET track_id = :2
+                UPDATE SET track_id = :tid
             WHEN NOT MATCHED THEN
-                INSERT (movie_id, track_id) VALUES (:1, :2)
-        """, [movie_id, tid])
+                INSERT (movie_id, track_id) VALUES (:mid, :tid)
+        """, {'mid': movie_id, 'tid': tid})
         
         # 로그 테이블에도 기록
         cur.execute("""
