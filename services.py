@@ -71,42 +71,57 @@ def update_box_office_data():
 # 3. Spotify 트랙 정보 저장 (수정됨)
 # ---------------------------------------------------------
 def save_track_details(track_id, cur, headers, genre_seeds=[]):
+    print(f"      [Service] save_track_details 호출됨: ID={track_id}") # 로그
+
     # 1. DB 확인
     cur.execute("SELECT track_title FROM TRACKS WHERE track_id=:1", [track_id])
     row = cur.fetchone()
     
-    # [핵심 수정] 이미 존재하더라도, 이름이 'Unknown'이면 다시 가져오도록 통과시킴!
-    # row[0]이 존재하고 'Unknown'이 아닐 때만 "이미 있다"고 판단함.
-    if row and row[0] and row[0] != 'Unknown':
-        return {"status": "exists", "name": row[0]}
+    if row:
+        print(f"      [Service] DB에 이미 있음: {row[0]}")
+        # Unknown이면 다시 긁어오도록 통과시킴
+        if row[0] and row[0] != 'Unknown':
+            return {"status": "exists", "name": row[0]}
+        else:
+            print("      [Service] 하지만 이름이 'Unknown'이라 다시 긁어옴!")
 
-    # 2. Spotify API 호출 (없거나 Unknown이면 실행)
+    # 2. Spotify API 호출
     try:
-        r = requests.get(f"{config.SPOTIFY_API_BASE}/tracks/{track_id}", headers=headers)
-        if r.status_code != 200: return None
+        url = f"{config.SPOTIFY_API_BASE}/tracks/{track_id}"
+        print(f"      [Service] API 요청: {url}") # 로그
+        
+        r = requests.get(url, headers=headers)
+        if r.status_code != 200: 
+            print(f"      [Service] ❌ API 실패: {r.status_code} - {r.text}")
+            return None
+            
         d = r.json()
-
         title = d['name']
+        print(f"      [Service] ✅ API 성공! 제목: {title}") # 로그
+
         artist = d['artists'][0]['name']
         album_id = d['album']['id']
         preview = d.get('preview_url')
         img = d['album']['images'][0]['url'] if d['album']['images'] else None
         duration = d['duration_ms']
 
+        # Audio Features (생략 가능하지만 로그 위해 둠)
         f_res = requests.get(f"{config.SPOTIFY_API_BASE}/audio-features/{track_id}", headers=headers)
         feat = f_res.json() if f_res.status_code == 200 else {}
         bpm = feat.get('tempo', 0)
         key = str(feat.get('key', -1))
 
-        # 3. DB 저장 (기존 'Unknown' 데이터가 있을 수 있으므로 삭제 후 삽입)
+        # 3. DB 저장
+        # 기존꺼 지우고 새로 넣기
         cur.execute("DELETE FROM TRACKS WHERE track_id=:1", [track_id])
         cur.execute("""
             INSERT INTO TRACKS (track_id, track_title, artist_name, album_id, preview_url, image_url, bpm, music_key, duration, views)
             VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, 0)
         """, [track_id, title, artist, album_id, preview, img, bpm, key, duration])
         
+        print("      [Service] DB INSERT 완료")
         return {"status": "saved", "name": title}
 
     except Exception as e:
-        print(f"❌ Track Save Error: {e}")
+        print(f"      [Service] ❌ 에러 발생: {e}")
         return None

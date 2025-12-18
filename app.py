@@ -300,35 +300,54 @@ def api_token(): return jsonify({"access_token": get_spotify_headers().get('Auth
 # [API] 영화 OST 수정 (Base64 디코딩 추가 버전)
 @app.route('/api/movie/<mid>/update-ost', methods=['POST'])
 def api_up_ost(mid):
+    print(f"\n🚀 [DEBUG] OST 수정 요청 도착! (입력된 mid: {mid})") # 로그
+
     try:
         d = request.get_json(force=True)
         link = d.get('spotifyUrl') or d.get('url')
         uid = d.get('user_id')
         
+        print(f"   -> 받은 데이터: link='{link}', user='{uid}'") # 로그
+
         if not link: return jsonify({"error": "URL이 없습니다."}), 400
 
-        # 🚨 [핵심 수정] 프론트에서 온 ID가 Base64라면 진짜 ID로 변환합니다.
+        # 1. Movie ID 디코딩 (로그 확인 필수!)
+        movie_id = mid
         try:
-            padded = mid + '=' * (-len(mid) % 4) # 패딩 복구
-            movie_id = base64.urlsafe_b64decode(padded).decode()
+            # 혹시 Base64라면 디코딩 시도
+            padded = mid + '=' * (-len(mid) % 4)
+            decoded = base64.urlsafe_b64decode(padded).decode()
+            # 숫자로만 구성되어 있거나 특정 형식이면 디코딩 성공으로 간주
+            if decoded.isdigit() or len(decoded) < len(mid):
+                movie_id = decoded
+                print(f"   -> 🔓 Base64 디코딩 성공: {mid} => {movie_id}")
+            else:
+                print(f"   -> 🔒 디코딩 결과가 이상함. 원본 사용: {mid}")
         except:
-            movie_id = mid # 실패하면 원래 값 사용 (혹시 진짜 ID가 왔을 경우 대비)
+            print(f"   -> 🔒 Base64 아님. 원본 사용: {mid}")
 
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # 1. 스포티파이 ID 추출
+        # 2. 트랙 ID 추출 (utils 로그가 여기서 찍힘)
         tid = extract_spotify_id(link)
-        if not tid: return jsonify({"error": "잘못된 Spotify 링크입니다."}), 400
+        if not tid: 
+            print("   -> ❌ 트랙 ID 추출 실패")
+            return jsonify({"error": "잘못된 Spotify 링크입니다."}), 400
 
-        # 2. 트랙 정보 저장
+        # 3. 트랙 정보 저장 (services 로그 확인)
+        print(f"   -> 🎵 트랙 정보 조회/저장 시도: {tid}")
         res = services.save_track_details(tid, cur, get_spotify_headers(), [])
         
-        if not res: return jsonify({"error": "트랙 정보를 찾을 수 없습니다."}), 404
+        if not res: 
+            print("   -> ❌ 트랙 정보를 못 가져옴 (Spotify API 오류?)")
+            return jsonify({"error": "트랙 정보를 가져오지 못했습니다."}), 404
 
         track_name = res.get('name', 'Unknown')
+        print(f"   -> ✅ 트랙 확보 완료: {track_name}")
 
-        # 3. [수정] 진짜 ID(movie_id)를 사용하여 연결 테이블 업데이트
+        # 4. DB 연결 (MERGE)
+        print(f"   -> 💾 DB 저장 시작 (Movie: {movie_id}, Track: {tid})")
         cur.execute("""
             MERGE INTO MOVIE_OSTS m
             USING DUAL ON (m.movie_id = :1)
@@ -337,22 +356,25 @@ def api_up_ost(mid):
             WHEN NOT MATCHED THEN
                 INSERT (movie_id, track_id) VALUES (:1, :2)
         """, [movie_id, tid])
-
-        # 4. 로그 기록
+        
+        # 로그 테이블에도 기록
         cur.execute("""
             INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, previous_value, new_value, user_id) 
             VALUES ('MOVIE_OST', :1, 'UPDATE', 'Unknown', :2, :3)
         """, [movie_id, f"Track:{track_name}", uid])
 
         conn.commit()
+        print("   -> ✨ 모든 과정 성공! 응답 전송.\n")
+        
         cur.close()
         conn.close()
-        
-        print(f"🎵 [OST Updated] Movie: {movie_id} <- Track: {track_name}")
+
         return jsonify({"message": "OST가 성공적으로 변경되었습니다.", "new_track": track_name})
 
     except Exception as e:
-        print(f"❌ OST Update Error: {e}")
+        print(f"❌ [CRITICAL ERROR] 처리 중 예외 발생: {e}") # 로그
+        import traceback
+        traceback.print_exc() # 상세 에러 스택 출력
         return jsonify({"error": str(e)}), 500
 
 # [수정] 태그 추가 API (밴 여부 체크)

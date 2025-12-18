@@ -25,29 +25,32 @@ def allowed_file(filename):
 # 🚨 [최종 수정] ID 추출 로직 (가장 강력한 방식)
 # URL의 경로(Path)를 쪼개서 맨 마지막 부분을 가져옵니다.
 def extract_spotify_id(url):
-    if not url: return None
+    print(f"🔍 [DEBUG] ID 추출 시작: '{url}'") # 로그
+    
+    if not url: 
+        print("   -> ❌ URL이 비어있음")
+        return None
     url = url.strip()
 
-    # 1. 쿼리 스트링 제거 (?si=... 등 삭제)
+    # 1. 쿼리 스트링 제거
     url = url.split('?')[0]
 
     # 2. 슬래시(/) 기준으로 쪼개기
-    # 예: http://google.com/spotify.com/59hVb... -> ['http:', ..., 'spotify.com', '59hVb...']
     parts = url.split('/')
-    
-    # 3. 빈 문자열 제거 (혹시 끝에 /가 붙어있을 경우 대비)
     parts = [p for p in parts if p.strip()]
 
-    if not parts: return None
+    if not parts: 
+        print("   -> ❌ 파싱 결과 아무것도 없음")
+        return None
 
-    # 4. 가장 마지막 부분이 ID입니다.
-    # 만약 마지막 부분이 'track'이나 'spotify.com'이라면 그 앞부분을 봅니다 (거의 그럴 일 없음)
+    # 3. 마지막 부분 추출
     candidate = parts[-1]
     
-    # (안전장치) 혹시 URL이 '.../track/' 으로 끝나서 ID가 없을 경우 대비
-    if candidate in ['track', 'spotify.com'] and len(parts) > 1:
-        return parts[-2]
+    # 예외 처리: 'track' 같은게 잡히면 그 앞을 봄
+    if candidate in ['track', 'http:', 'https:', 'spotify.com'] and len(parts) > 1:
+        candidate = parts[-2]
 
+    print(f"   -> ✅ 추출된 ID: '{candidate}'") # 로그
     return candidate
 
 # --- 2. 보안 (Turnstile) ---
