@@ -297,7 +297,8 @@ def api_user_update():
 @app.route('/api/spotify-token', methods=['GET'])
 def api_token(): return jsonify({"access_token": get_spotify_headers().get('Authorization', '').split(' ')[1]})
 
-# [API] 영화 OST 수정 (Base64 디코딩 추가 버전)
+
+# [API] 영화 OST 수정 (NameError 수정 완료)
 @app.route('/api/movie/<mid>/update-ost', methods=['POST'])
 def api_up_ost(mid):
     print(f"\n🚀 [DEBUG] OST 수정 요청 도착! (입력된 mid: {mid})") # 로그
@@ -311,13 +312,11 @@ def api_up_ost(mid):
 
         if not link: return jsonify({"error": "URL이 없습니다."}), 400
 
-        # 1. Movie ID 디코딩 (로그 확인 필수!)
+        # 1. Movie ID 디코딩
         movie_id = mid
         try:
-            # 혹시 Base64라면 디코딩 시도
             padded = mid + '=' * (-len(mid) % 4)
             decoded = base64.urlsafe_b64decode(padded).decode()
-            # 숫자로만 구성되어 있거나 특정 형식이면 디코딩 성공으로 간주
             if decoded.isdigit() or len(decoded) < len(mid):
                 movie_id = decoded
                 print(f"   -> 🔓 Base64 디코딩 성공: {mid} => {movie_id}")
@@ -329,15 +328,17 @@ def api_up_ost(mid):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # 2. 트랙 ID 추출 (utils 로그가 여기서 찍힘)
+        # 2. 트랙 ID 추출
         tid = extract_spotify_id(link)
         if not tid: 
             print("   -> ❌ 트랙 ID 추출 실패")
             return jsonify({"error": "잘못된 Spotify 링크입니다."}), 400
 
-        # 3. 트랙 정보 저장 (services 로그 확인)
+        # 3. 트랙 정보 저장 (🚨 여기가 문제였음! services. 제거)
         print(f"   -> 🎵 트랙 정보 조회/저장 시도: {tid}")
-        res = services.save_track_details(tid, cur, get_spotify_headers(), [])
+        
+        # [수정] services.save_track_details -> save_track_details
+        res = save_track_details(tid, cur, get_spotify_headers(), [])
         
         if not res: 
             print("   -> ❌ 트랙 정보를 못 가져옴 (Spotify API 오류?)")
@@ -372,9 +373,9 @@ def api_up_ost(mid):
         return jsonify({"message": "OST가 성공적으로 변경되었습니다.", "new_track": track_name})
 
     except Exception as e:
-        print(f"❌ [CRITICAL ERROR] 처리 중 예외 발생: {e}") # 로그
+        print(f"❌ [CRITICAL ERROR] 처리 중 예외 발생: {e}")
         import traceback
-        traceback.print_exc() # 상세 에러 스택 출력
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 # [수정] 태그 추가 API (밴 여부 체크)
