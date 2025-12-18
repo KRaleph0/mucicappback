@@ -299,17 +299,54 @@ def api_token(): return jsonify({"access_token": get_spotify_headers().get('Auth
 
 @app.route('/api/movie/<mid>/update-ost', methods=['POST'])
 def api_up_ost(mid):
-    d = request.get_json(force=True); link = d.get('spotifyUrl'); uid = d.get('user_id')
     try:
-        conn = get_db_connection(); cur = conn.cursor()
+        d = request.get_json(force=True)
+        link = d.get('spotifyUrl') or d.get('url') # 필드명 호환성 확보
+        uid = d.get('user_id')
+        
+        if not link: return jsonify({"error": "URL이 없습니다."}), 400
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # 1. ID 추출
         tid = extract_spotify_id(link)
-        if not tid: return jsonify({"error": "Link Error"}), 400
-        res = save_track_details(tid, cur, get_spotify_headers(), [])
-        cur.execute("DELETE FROM MOVIE_OSTS WHERE movie_id=:1", [mid])
-        cur.execute("INSERT INTO MOVIE_OSTS (movie_id, track_id) VALUES (:1, :2)", [mid, tid])
-        cur.execute("INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, previous_value, new_value, user_id) VALUES ('MOVIE_OST', :1, 'UPDATE', 'NONE', :2, :3)", [mid, tid, uid])
-        conn.commit(); return jsonify({"message": "Updated", "new_track": res['name']})
-    except Exception as e: return jsonify({"error": str(e)}), 500
+        if not tid: return jsonify({"error": "잘못된 Spotify 링크입니다."}), 400
+
+        # 2. 트랙 정보 저장/갱신 (services.py 호출)
+        # 이제 'Unknown'이면 덮어쓰기 때문에 올바른 이름을 가져옵니다.
+        res = services.save_track_details(tid, cur, get_spotify_headers(), [])
+        
+        if not res or not res.get('name'):
+            return jsonify({"error": "트랙 정보를 가져오지 못했습니다."}), 404
+
+        track_name = res['name']
+
+        # 3. 영화-OST 연결 업데이트 (MERGE 사용으로 안전하게)
+        cur.execute("""
+            MERGE INTO MOVIE_OSTS m
+            USING DUAL ON (m.movie_id = :1)
+            WHEN MATCHED THEN
+                UPDATE SET track_id = :2
+            WHEN NOT MATCHED THEN
+                INSERT (movie_id, track_id) VALUES (:1, :2)
+        """, [mid, tid])
+
+        # 4. 로그 기록
+        cur.execute("""
+            INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, previous_value, new_value, user_id) 
+            VALUES ('MOVIE_OST', :1, 'UPDATE', 'Unknown', :2, :3)
+        """, [mid, f"Track:{track_name}", uid])
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return jsonify({"message": "OST가 성공적으로 변경되었습니다.", "new_track": track_name})
+
+    except Exception as e:
+        print(f"❌ OST Update Error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # [수정] 태그 추가 API (밴 여부 체크)
 @app.route('/api/track/<tid>/tags', methods=['POST'])
