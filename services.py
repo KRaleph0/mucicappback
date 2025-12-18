@@ -40,13 +40,27 @@ def update_box_office_data():
         if not daily_list: return "No Data"
 
         conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("DELETE FROM MOVIES") 
+        
+        # 🚨 [삭제] 기존 데이터를 날려버리는 이 코드를 지웁니다!
+        # cur.execute("DELETE FROM MOVIES") 
         
         count = 0
         for item in daily_list:
-            rank = int(item['rank']); title = item['movieNm']; mid = item['movieCd']
+            rank = int(item['rank'])
+            title = item['movieNm']
+            mid = item['movieCd']
             poster = get_tmdb_poster(title) or "img/playlist-placeholder.png"
-            cur.execute("INSERT INTO MOVIES (movie_id, title, rank, poster_url) VALUES (:1, :2, :3, :4)", [mid, title, rank, poster])
+
+            # [수정] MERGE 문을 사용하여 기존 ID가 있으면 내용만 갱신, 없으면 추가
+            cur.execute("""
+                MERGE INTO MOVIES m
+                USING DUAL ON (m.movie_id = :1)
+                WHEN MATCHED THEN
+                    UPDATE SET rank = :3, poster_url = :4, title = :2
+                WHEN NOT MATCHED THEN
+                    INSERT (movie_id, title, rank, poster_url) 
+                    VALUES (:1, :2, :3, :4)
+            """, [mid, title, rank, poster])
             count += 1
             
         conn.commit(); conn.close()

@@ -307,13 +307,12 @@ def api_up_ost(mid):
         
         if not link: return jsonify({"error": "URL이 없습니다."}), 400
 
-        # [핵심 수정] 받아온 ID(mid)가 Base64라면 풉니다.
-        # 예: "MjAyND..." -> "2024..."
+        # 🚨 [핵심 수정] 프론트에서 온 ID가 Base64라면 진짜 ID로 변환합니다.
         try:
             padded = mid + '=' * (-len(mid) % 4) # 패딩 복구
             movie_id = base64.urlsafe_b64decode(padded).decode()
         except:
-            movie_id = mid # 실패하면 원래 값 사용
+            movie_id = mid # 실패하면 원래 값 사용 (혹시 진짜 ID가 왔을 경우 대비)
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -322,11 +321,14 @@ def api_up_ost(mid):
         tid = extract_spotify_id(link)
         if not tid: return jsonify({"error": "잘못된 Spotify 링크입니다."}), 400
 
-        # 2. 트랙 정보 저장 (services.py 활용)
+        # 2. 트랙 정보 저장
         res = services.save_track_details(tid, cur, get_spotify_headers(), [])
         
+        if not res: return jsonify({"error": "트랙 정보를 찾을 수 없습니다."}), 404
+
+        track_name = res.get('name', 'Unknown')
+
         # 3. [수정] 진짜 ID(movie_id)를 사용하여 연결 테이블 업데이트
-        # MERGE 문으로 안전하게 처리
         cur.execute("""
             MERGE INTO MOVIE_OSTS m
             USING DUAL ON (m.movie_id = :1)
@@ -337,7 +339,6 @@ def api_up_ost(mid):
         """, [movie_id, tid])
 
         # 4. 로그 기록
-        track_name = res['name'] if res else tid
         cur.execute("""
             INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, previous_value, new_value, user_id) 
             VALUES ('MOVIE_OST', :1, 'UPDATE', 'Unknown', :2, :3)
@@ -347,13 +348,12 @@ def api_up_ost(mid):
         cur.close()
         conn.close()
         
-        print(f"🎵 [OST Updated] Movie: {movie_id} (Decoded) <- Track: {track_name}")
+        print(f"🎵 [OST Updated] Movie: {movie_id} <- Track: {track_name}")
         return jsonify({"message": "OST가 성공적으로 변경되었습니다.", "new_track": track_name})
 
     except Exception as e:
         print(f"❌ OST Update Error: {e}")
         return jsonify({"error": str(e)}), 500
-
 
 # [수정] 태그 추가 API (밴 여부 체크)
 @app.route('/api/track/<tid>/tags', methods=['POST'])
