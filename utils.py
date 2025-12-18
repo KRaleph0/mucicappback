@@ -19,29 +19,31 @@ def clean_text(text):
 def get_similarity(a, b):
     return SequenceMatcher(None, clean_text(a), clean_text(b)).ratio()
 
-def ms_to_iso_duration(ms):
-    if not ms: return "PT0M0S"
-    seconds = int((ms / 1000) % 60)
-    minutes = int((ms / (1000 * 60)) % 60)
-    return f"PT{minutes}M{seconds}S"
-
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in config.ALLOWED_EXTENSIONS
 
-# [NEW] 이 함수가 꼭 필요합니다!
+# 🚨 [수정] ID 추출 로직 개선 (가장 중요!)
 def extract_spotify_id(url):
-    # URL이 그냥 숫자거나 짧은 문자열이면 그대로 ID로 간주 (모의 서버 대응)
-    if '/' not in url:
+    if not url: return None
+    url = url.strip()
+
+    # 1. URL이 아닌 그냥 숫자만 들어왔을 경우 (모의 서버 ID)
+    if url.isdigit():
         return url
         
-    # url 끝부분 추출 로직 (표준 링크 및 모의 링크 대응)
-    # 예: .../track/3 -> 3 추출
-    # 예: .../spotify.com/3 -> 3 추출
-    match = re.search(r'(?:track/|spotify\.com/|/)([\w\d]+)(?:\?|$)', url)
-    if match:
-        return match.group(1)
-        
-    # 매칭 안되면 마지막 슬래시 뒤의 값 반환
+    # 2. http://.../spotify.com/<ID> 형태 (모의 서버 링크)
+    # 'spotify.com/' 문자열 뒤에 있는 값을 찾습니다.
+    match_mock = re.search(r'spotify\.com/([\w\d]+)', url)
+    if match_mock:
+        return match_mock.group(1)
+
+    # 3. 정식 Spotify 링크 (open.spotify.com/track/<ID>)
+    match_real = re.search(r'track/([\w\d]+)', url)
+    if match_real:
+        return match_real.group(1)
+
+    # 4. 최후의 수단: 마지막 슬래시 뒤의 값 (쿼리 스트링 제거)
+    # 예: spotify.com/3 -> 5
     return url.split('/')[-1].split('?')[0]
 
 # --- 2. 보안 (Turnstile) ---
@@ -58,15 +60,16 @@ def verify_turnstile(token):
 # --- 3. 외부 API 연동 (Spotify) ---
 def get_spotify_headers():
     if not config.SPOTIFY_CLIENT_ID or not config.SPOTIFY_CLIENT_SECRET:
-        # 키가 없으면 빈 딕셔너리 반환 (서버 죽는 것 방지)
         return {}
-    auth = base64.b64encode(f"{config.SPOTIFY_CLIENT_ID}:{config.SPOTIFY_CLIENT_SECRET}".encode()).decode()
-    res = requests.post(config.SPOTIFY_AUTH_URL, headers={
-        'Authorization': f'Basic {auth}',
-        'Content-Type': 'application/x-www-form-urlencoded'
-    }, data={'grant_type': 'client_credentials'})
-    if res.status_code == 200:
-        return {'Authorization': f'Bearer {res.json().get("access_token")}'}
+    try:
+        auth = base64.b64encode(f"{config.SPOTIFY_CLIENT_ID}:{config.SPOTIFY_CLIENT_SECRET}".encode()).decode()
+        res = requests.post(config.SPOTIFY_AUTH_URL, headers={
+            'Authorization': f'Basic {auth}',
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }, data={'grant_type': 'client_credentials'}, timeout=5)
+        if res.status_code == 200:
+            return {'Authorization': f'Bearer {res.json().get("access_token")}'}
+    except: pass
     return {}
 
 # --- 4. 공공데이터 API 연동 ---
@@ -115,13 +118,3 @@ def get_today_holiday():
                 return item.get('dateName')
         return None
     except: return None
-
-def get_kobis_metadata(movie_name):
-    try:
-        res = requests.get(config.KOBIS_MOVIE_LIST_URL, params={'key': config.KOBIS_API_KEY, 'movieNm': movie_name}).json()
-        mlist = res.get('movieListResult', {}).get('movieList', [])
-        if mlist:
-            t = mlist[0]
-            return (t.get('genreAlt', '').split(','), t.get('movieNmEn', ''), t.get('movieNmOg', ''))
-        return [], "", ""
-    except: return [], "", ""
