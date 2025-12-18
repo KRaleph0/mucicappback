@@ -1,4 +1,3 @@
-# database.py
 import oracledb
 from flask import g
 import config
@@ -31,10 +30,11 @@ def close_db(exception=None):
     if db is not None:
         try:
             db.close()
-        except oracledb.exceptions.InterfaceError as e:
+        # [수정] oracledb.exceptions.InterfaceError -> oracledb.InterfaceError
+        except oracledb.InterfaceError as e:
             # DPY-1001: 이미 끊긴 연결 → 조용히 무시
             if "DPY-1001" in str(e):
-                print(f"[DB Close Warning] {e}")
+                print(f"[DB Close Warning] (Already Closed) {e}")
             else:
                 print(f"[DB Close Error] {e}")
         except Exception as e:
