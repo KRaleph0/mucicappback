@@ -54,7 +54,7 @@ def update_box_office_data():
     except Exception as e: return f"Error: {str(e)}"
 
 # ---------------------------------------------------------
-# 3. Spotify 트랙 정보 저장 (중복 제거 및 Unknown 수정 로직 적용)
+# 3. Spotify 트랙 정보 저장 (수정됨)
 # ---------------------------------------------------------
 def save_track_details(track_id, cur, headers, genre_seeds=[]):
     # 1. DB 확인
@@ -62,11 +62,11 @@ def save_track_details(track_id, cur, headers, genre_seeds=[]):
     row = cur.fetchone()
     
     # [핵심 수정] 이미 존재하더라도, 이름이 'Unknown'이면 다시 가져오도록 통과시킴!
-    # row[0]이 None이거나 'Unknown'이면 아래 API 호출 로직으로 넘어갑니다.
+    # row[0]이 존재하고 'Unknown'이 아닐 때만 "이미 있다"고 판단함.
     if row and row[0] and row[0] != 'Unknown':
         return {"status": "exists", "name": row[0]}
 
-    # 2. Spotify API 호출
+    # 2. Spotify API 호출 (없거나 Unknown이면 실행)
     try:
         r = requests.get(f"{config.SPOTIFY_API_BASE}/tracks/{track_id}", headers=headers)
         if r.status_code != 200: return None
