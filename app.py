@@ -390,43 +390,35 @@ def api_add_tags(tid):
         cur.execute("SELECT is_banned FROM USERS WHERE user_id=:1", [uid])
         user_row = cur.fetchone()
         if user_row and user_row[0] == 1:
-            return jsonify({"error": "태그 편집 권한이 박탈된 계정입니다. 관리자에게 문의하세요."}), 403
+            return jsonify({"error": "태그 편집 권한이 박탈된 계정입니다."}), 403
 
-        # 🚨 [핵심 수정] 2. 곡이 DB에 있는지 확인하고, 없으면 저장!
+        # 🚨 [필수] 곡이 DB에 없으면 먼저 저장 (이게 없어서 저장이 안 된 것!)
         cur.execute("SELECT 1 FROM TRACKS WHERE track_id=:1", [tid])
         if not cur.fetchone():
             print(f"🎵 [Auto-Save] 태그 추가를 위해 곡 정보를 먼저 저장합니다: {tid}")
-            # services.py의 함수 재사용
-            track_info = save_track_details(tid, cur, get_spotify_headers(), [])
-            if not track_info:
-                return jsonify({"error": "곡 정보를 가져올 수 없어 태그를 추가할 수 없습니다."}), 404
+            res = save_track_details(tid, cur, get_spotify_headers(), [])
+            if not res: return jsonify({"error": "곡 정보 저장 실패"}), 404
 
-        # 3. 태그 추가 (이제 안전함)
+        # 2. 태그 저장
         for t in tags:
             t = t.strip()
             if not t: continue
             if not t.startswith('tag:'): t = f"tag:{t}"
             
             targets = {t}
-            # SKOS 확장이 활성화되어 있다면 상위 개념도 같이 추가
             if skos_manager: targets.update(skos_manager.get_broader_tags(t))
             
             for final_tag in targets:
                 try: 
-                    # MERGE 문으로 중복 방지하며 저장
                     cur.execute("MERGE INTO TRACK_TAGS t USING (SELECT :1 a, :2 b FROM dual) s ON (t.track_id=s.a AND t.tag_id=s.b) WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.a, s.b)", [tid, final_tag])
-                    # 로그 기록
                     cur.execute("INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, new_value, user_id) VALUES ('TRACK_TAG', :1, 'ADD', :2, :3)", [tid, final_tag, uid])
-                except Exception as tag_err: 
-                    print(f"⚠️ 태그 저장 중 오류 무시됨 ({final_tag}): {tag_err}")
+                except Exception as e: 
+                    print(f"⚠️ 태그 저장 에러 무시됨: {e}")
                     pass
         
         conn.commit()
         return jsonify({"message": "Saved"})
-
-    except Exception as e:
-        print(f"❌ 태그 추가 실패: {e}")
-        return jsonify({"error": str(e)}), 500
+    except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route('/api/track/<tid>/tags', methods=['DELETE'])
 def api_delete_tag(tid):
