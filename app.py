@@ -194,24 +194,34 @@ def get_box_office_ttl():
 # =========================================================
 # 3. 검색 API
 # =========================================================
+
 @app.route('/api/search', methods=['GET'])
 def api_search():
-    q = request.args.get('q', ''); offset = int(request.args.get('offset', '0'))
+    q = request.args.get('q', '')
+    offset = int(request.args.get('offset', '0'))
     if not q: return jsonify({"error": "No query"}), 400
     db_items = []
     
+    # 태그 검색인 경우
     if q.startswith('tag:'):
         try:
-            tag_keyword = q.replace('tag:', '').strip(); original_tag_clean = tag_keyword.lower()
+            tag_keyword = q.replace('tag:', '').strip()
+            
+            # 1. 검색어 확장 (SKOS)
             search_tags = [tag_keyword]
             if skos_manager:
+                # get_narrower_tags가 이제 ['JPop', 'J-Pop', 'Jpop', '제이팝'] 다 줍니다.
                 expanded = skos_manager.get_narrower_tags(tag_keyword)
                 if expanded: search_tags = expanded
+            
+            print(f"🔍 [Search] '{tag_keyword}' 확장 결과: {search_tags}") # 디버그 로그
 
             conn = get_db_connection(); cur = conn.cursor()
-            final_search_terms = [f"tag:{t}" for t in search_tags]
-            bind_names = [f":t{i}" for i in range(len(final_search_terms))]
-            bind_dict = {f"t{i}": t for i, t in enumerate(final_search_terms)}
+            
+            # 2. 쿼리 생성 (대소문자 무시 비교)
+            # tag: 접두어를 붙여서 비교
+            bind_names = [f":t{i}" for i in range(len(search_tags))]
+            bind_dict = {f"t{i}": f"tag:{t}" for i, t in enumerate(search_tags)}
             
             sql = f"""
                 SELECT DISTINCT t.track_id, t.track_title, t.artist_name, t.image_url, t.preview_url, t.views, tt.tag_id
@@ -219,17 +229,32 @@ def api_search():
                 JOIN TRACK_TAGS tt ON t.track_id = tt.track_id
                 WHERE LOWER(tt.tag_id) IN ({','.join(['LOWER(' + b + ')' for b in bind_names])})
             """
-            cur.execute(sql, bind_dict); rows = cur.fetchall()
+            cur.execute(sql, bind_dict)
+            rows = cur.fetchall()
+            
+            # ... (결과 가공 로직 기존과 동일) ...
             temp_tracks = {}
+            original_tag_clean = tag_keyword.lower()
             for r in rows:
-                tid = r[0]; current_tag_suffix = r[6].replace('tag:', '').lower(); views = r[5] or 0
-                score = views + (10_000_000_000 if current_tag_suffix == original_tag_clean else 0)
+                tid = r[0]
+                # 태그 일치도에 따라 점수 부여
+                current_tag_suffix = r[6].replace('tag:', '').lower()
+                views = r[5] or 0
+                score = views
+                if current_tag_suffix == original_tag_clean: score += 10000
+                elif current_tag_suffix in [s.lower() for s in search_tags]: score += 5000
+                
                 if tid not in temp_tracks or score > temp_tracks[tid]['score']:
-                    temp_tracks[tid] = { "data": { "id": r[0], "name": f"[추천] {r[1]}", "artists": [{"name": r[2]}], "album": { "name": "Unknown", "images": [{"url": r[3] or "img/playlist-placeholder.png"}] }, "preview_url": r[4], "external_urls": {"spotify": f"http://googleusercontent.com/spotify.com/{r[0]}"} }, "score": score }
+                    temp_tracks[tid] = { "data": { "id": r[0], "name": f"[추천] {r[1]}", "artists": [{"name": r[2]}], "album": { "name": "Unknown", "images": [{"url": r[3] or "img/playlist-placeholder.png"}] }, "preview_url": r[4] }, "score": score }
+            
             sorted_tracks = sorted(temp_tracks.values(), key=lambda x: x['score'], reverse=True)
             db_items = [t['data'] for t in sorted_tracks]
-        except Exception as e: print(f"❌ DB Search Error: {e}")
 
+        except Exception as e: 
+            print(f"❌ DB Search Error: {e}")
+            import traceback; traceback.print_exc()
+
+    # ... (Spotify 검색 및 병합 로직 기존과 동일) ...
     spotify_items = []
     try:
         headers = get_spotify_headers(); params = {"q": q, "type": "track", "limit": "20", "offset": offset, "market": "KR"}
@@ -243,6 +268,53 @@ def api_search():
     for item in spotify_items:
         if item['id'] not in seen_ids: final_items.append(item); seen_ids.add(item['id'])
     return jsonify({ "tracks": { "items": final_items, "total": len(final_items), "offset": offset } })
+
+# [태그 추가 API] 곡 자동 저장 + SKOS 상위 태그 저장
+@app.route('/api/track/<tid>/tags', methods=['POST'])
+def api_add_tags(tid):
+    d = request.get_json(force=True); tags = d.get('tags', [])
+    uid = d.get('user_id', 'unknown')
+    try:
+        conn = get_db_connection(); cur = conn.cursor()
+        
+        cur.execute("SELECT is_banned FROM USERS WHERE user_id=:1", [uid])
+        user_row = cur.fetchone()
+        if user_row and user_row[0] == 1:
+            return jsonify({"error": "태그 편집 권한이 박탈된 계정입니다."}), 403
+
+        # 🚨 [필수] 곡 정보 자동 저장
+        cur.execute("SELECT 1 FROM TRACKS WHERE track_id=:1", [tid])
+        if not cur.fetchone():
+            print(f"🎵 [Auto-Save] 태그 추가 전 곡 저장: {tid}")
+            res = save_track_details(tid, cur, get_spotify_headers(), [])
+            if not res: return jsonify({"error": "곡 정보 저장 실패"}), 404
+
+        for t in tags:
+            t = t.strip()
+            if not t: continue
+            if not t.startswith('tag:'): t = f"tag:{t}"
+            
+            # 저장할 태그 목록 (원본 + 상위 개념)
+            targets = {t}
+            if skos_manager: 
+                # tag: 제외한 키워드로 상위 개념 검색
+                keyword = t.replace('tag:', '')
+                broader = skos_manager.get_broader_tags(keyword)
+                for b in broader: targets.add(f"tag:{b}")
+            
+            print(f"🏷️ [Tagging] '{t}' -> 저장될 태그들: {targets}") # 로그
+
+            for final_tag in targets:
+                try: 
+                    cur.execute("MERGE INTO TRACK_TAGS t USING (SELECT :1 a, :2 b FROM dual) s ON (t.track_id=s.a AND t.tag_id=s.b) WHEN NOT MATCHED THEN INSERT (track_id, tag_id) VALUES (s.a, s.b)", [tid, final_tag])
+                    cur.execute("INSERT INTO MODIFICATION_LOGS (target_type, target_id, action_type, new_value, user_id) VALUES ('TRACK_TAG', :1, 'ADD', :2, :3)", [tid, final_tag, uid])
+                except Exception as e: 
+                    print(f"⚠️ 태그 저장 에러 무시 ({final_tag}): {e}")
+                    pass
+        
+        conn.commit()
+        return jsonify({"message": "Saved"})
+    except Exception as e: return jsonify({"error": str(e)}), 500
 
 # =========================================================
 # 4. 유저 및 태그 관리 API
