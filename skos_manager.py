@@ -19,18 +19,32 @@ class SkosManager:
     def _find_concept_uri(self, keyword):
         """키워드(ID 또는 라벨)로 개념 URI 찾기"""
         target = self._normalize(keyword)
+        candidates = []
         
-        # 1. URI의 끝부분(ID)으로 검색 (예: 'Pop' -> komc:Genre_Pop)
+        # 1. URI의 끝부분(ID)으로 검색 (예: 'Pop' -> komc:Genre_Pop, komc:tag_Pop)
         for s in self.g.subjects(RDF.type, SKOS.Concept):
             if str(s).split("_")[-1].lower() == target:
-                return s
+                candidates.append(s)
         
-        # 2. 라벨(prefLabel)로 검색 (예: '휴식' -> komc:tag_Rest)
-        for s, p, o in self.g.triples((None, SKOS.prefLabel, None)):
-            if str(o).lower() == target:
-                return s
-                
-        return None
+        # 2. ID 매칭이 없을 경우 라벨(prefLabel)로 검색 (예: '휴식' -> komc:tag_Rest)
+        if not candidates:
+            for s, p, o in self.g.triples((None, SKOS.prefLabel, None)):
+                if str(o).lower() == target:
+                    candidates.append(s)
+        
+        if not candidates:
+            return None
+
+        # [버그 수정 핵심] 
+        # 후보군 중에 'Genre_'나 'Weather_'로 시작하는(계층 구조를 가진) 개념이 있다면 그것을 우선 선택합니다.
+        # 이렇게 해야 'Pop' 검색 시 'tag_Pop'(말단) 대신 'Genre_Pop'(상위)이 선택되어 하위 장르(JPop 등)까지 검색됩니다.
+        for uri in candidates:
+            uri_str = str(uri)
+            if "Genre_" in uri_str or "Weather_" in uri_str:
+                return uri
+
+        # 계층 구조 개념이 없으면 첫 번째 후보 반환
+        return candidates[0]
 
     def _get_all_labels(self, uri):
         """특정 개념의 ID와 모든 라벨(한/영)을 반환"""
